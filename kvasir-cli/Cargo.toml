@@ -1,0 +1,17 @@
+[package]
+name = "kvasir-cli"
+description = "kvasir command line — process-isolated checks; budgets are plain process deadlines"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "kvasir"
+path = "src/main.rs"
+
+[dependencies]
+kvasir-core = { path = "../kvasir-core" }
+kvasir-check = { path = "../kvasir-check" }
+serde_json = { workspace = true }

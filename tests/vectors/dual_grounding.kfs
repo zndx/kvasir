@@ -1,0 +1,12 @@
+# The founding differential vector — the dual-grounding collision observed live in the upstream
+# realize (aegir, 2026-07-02): a derived class equivalent to process ⊓ continuant under BFO's
+# continuant ⊥ occurrent, with a membrane-admitted individual asserted into it.
+#
+# HermiT's verdict on the equivalent OWL: DualGroundedThing unsatisfiable (whole KB inconsistent
+# with the assertion). kvasir must agree — REFUTED, exit 1, with a proof kvasir-check validates.
+SubClassOf <process> <occurrent>
+SubClassOf <function> <continuant>
+DisjointClasses <continuant> <occurrent>
+EquivalentToIntersection <DualGroundedThing> <process> <continuant>
+SubClassOfExistential <ExecutiveDirectorRole> <realized_in> <function>   # inert at v0; active at T3
+ClassAssertion <DualGroundedThing> <i_sample_01>

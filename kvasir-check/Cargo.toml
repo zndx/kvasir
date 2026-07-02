@@ -1,0 +1,11 @@
+[package]
+name = "kvasir-check"
+description = "The small trusted kernel: validates kvasir proof DAGs step-by-step (De Bruijn criterion)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+kvasir-core = { path = "../kvasir-core" }

@@ -1,0 +1,27 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+      - name: founding vector (dual-grounding must be REFUTED, exit 1)
+        run: |
+          cargo run -q -p kvasir-cli -- check tests/vectors/dual_grounding.kfs --json && exit 1 || test $? -eq 1
+
+  # T2 (upstream aegir #132): the differential harness — every commit re-verified against HermiT
+  # (and ELK where the EL profile fits) over a regression corpus grown from upstream releases.
+  # Placeholder until the harness lands; kvasir cannot earn certification authority without it.
+  # differential:
+  #   runs-on: ubuntu-latest
+  #   steps: [checkout, fetch corpus, run kvasir + HermiT + ELK, diff verdicts, fail on skew]
