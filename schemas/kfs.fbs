@@ -1,0 +1,49 @@
+// KFS binary — the kvasir fact-stream payload.
+//
+// FlatBuffers at the PAYLOAD layer, in keeping with Apache Kudu's direction (KUDU-1261: FlatBuffers
+// for array-cell payloads inside the protobuf envelope; benchmarked ~7-8x faster ser/de than protobuf,
+// buffer reuse without reallocation, no temporary objects). Envelope protocols stay wherever they are
+// (the upstream engine speaks gRPC/protobuf); the fact stream itself is zero-copy: mmap the .kfsb and
+// read axioms in place.
+//
+// THE SCHEMA IS THE FRAGMENT: the AxiomKind union can only represent pinned-fragment constructs, so an
+// out-of-fragment axiom is unrepresentable in a well-formed buffer. For binary input the fragment gate
+// therefore lives at the WRITER (which must refuse to serialize what the schema cannot say — the same
+// loud contract); the text KFS reader keeps its reader-side gate. Adding a construct here is a visible,
+// reviewed act that widens the engine's fragment — never a silent extension.
+//
+// Names are interned once at write time; axioms carry u32 indexes into `names`. The reader gets
+// integer facts for free (the saturation core wants integers), and the writer's dictionary is the
+// dedup. An out-of-range index is a loud reader error, never a default.
+
+namespace kvasir.kfs;
+
+file_identifier "KFS0";
+file_extension "kfsb";
+
+table SubClassOf { sub: uint32; sup: uint32; }
+table EquivalentToIntersection { lhs: uint32; parts: [uint32] (required); }
+table SubClassOfExistential { sub: uint32; role: uint32; filler: uint32; }
+table DisjointClasses { a: uint32; b: uint32; }
+table ClassAssertion { cls: uint32; individual: uint32; }
+
+union AxiomKind {
+  SubClassOf,
+  EquivalentToIntersection,
+  SubClassOfExistential,
+  DisjointClasses,
+  ClassAssertion,
+}
+
+table Axiom { kind: AxiomKind (required); }
+
+table FactStream {
+  version: uint16 = 1;
+  /// interned entity names; axioms reference by index
+  names: [string] (required);
+  axioms: [Axiom] (required);
+  /// provenance of the emitting artifact (e.g. "sdg-ontology@<git-sha>")
+  source: string;
+}
+
+root_type FactStream;

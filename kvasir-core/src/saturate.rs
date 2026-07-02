@@ -17,11 +17,11 @@ pub fn saturate(axioms: &[Axiom]) -> Verdict {
     let mut fact_ids: HashMap<Fact, usize> = HashMap::new();
 
     let add = |proof: &mut Proof,
-                   fact_ids: &mut HashMap<Fact, usize>,
-                   rule: Rule,
-                   premises: Vec<usize>,
-                   axiom: Option<usize>,
-                   fact: Fact|
+               fact_ids: &mut HashMap<Fact, usize>,
+               rule: Rule,
+               premises: Vec<usize>,
+               axiom: Option<usize>,
+               fact: Fact|
      -> Option<usize> {
         if fact_ids.contains_key(&fact) {
             return None; // first derivation wins; the DAG stays minimal-ish

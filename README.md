@@ -76,6 +76,28 @@ ClassAssertion <c> <i>
 `horned-owl` ingestion of the upstream `.owl` (RDF/XML) is the planned second front-end; the gate remains
 the arbiter either way.
 
+### Integration: KFS binary (FlatBuffers payload)
+
+`schemas/kfs.fbs` defines the **payload-layer** integration point, in keeping with Apache Kudu's
+direction (KUDU-1261: FlatBuffers for bulk cell payloads inside the protobuf envelope — benchmarked
+~7–8× faster ser/de than protobuf, buffer reuse without reallocation). Envelope protocols stay wherever
+they are (the upstream engine speaks gRPC/protobuf); the fact stream itself is zero-copy:
+
+- **The schema is the fragment.** The `AxiomKind` union can only represent pinned-fragment constructs —
+  an out-of-fragment axiom is *unrepresentable* in a well-formed buffer. For binary input the gate moves
+  to the writer (refuse to serialize what the schema cannot say); text KFS keeps the reader-side gate.
+  Widening the union is a visible, reviewed act.
+- **Names interned once**, axioms carry `u32` indexes — the reader gets integer facts (what the
+  saturation core wants) with no parse. Out-of-range indexes are loud errors, never defaults.
+- **Verified reads** (`flatbuffers::root` runs the verifier); corrupt buffers fail loudly (tested).
+- **Cross-language by generation**: `flatc --rust` (checked into `kvasir-core/src/generated/`) and
+  `flatc --python` (`bindings/python/`) from the one `.fbs` — no hand parser on either side, so
+  differential engines cannot diverge at the parse. Proven: Python writes, Rust refutes, verdicts agree.
+- `kvasir check file.kfsb` (extension-dispatched) · `kvasir convert in.kfs out.kfsb`.
+
+Verdicts + proof DAGs as FlatBuffers (mmap-able stored artifacts — proofs as data-plane citizens) is the
+natural next table in the same schema.
+
 ## Roadmap
 
 - **T2** (upstream aegir #132): exact fragment measurement of the live ontology; ELK where the EL profile

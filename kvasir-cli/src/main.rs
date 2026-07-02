@@ -1,4 +1,6 @@
-//! kvasir CLI — `kvasir check <file.kfs> [--json]`
+//! kvasir CLI —
+//!   `kvasir check <file.kfs|file.kfsb> [--json]`   gate + saturate + self-checked verdict
+//!   `kvasir convert <in.kfs> <out.kfsb>`           text → FlatBuffers payload (KFS binary)
 //!
 //! Exit codes (stable interface for the upstream membrane):
 //!   0  no clash found (NOT a certificate — see README doctrine rule 2)
@@ -7,29 +9,50 @@
 //!   3  internal error / proof failed self-check (a verdict without a valid proof is no verdict)
 //!
 //! Process isolation is the budget story: the caller deadlines or kills this process; there is no
-//! uninterruptible in-process tableau.
+//! uninterruptible in-process tableau. `.kfsb` is the payload-layer FlatBuffers front-end (Kudu-style:
+//! bulk data zero-copy; envelope protocols unchanged) — dispatched by extension.
 
 use std::process::ExitCode;
 
-use kvasir_core::{check, Verdict};
+use kvasir_core::{check, check_kfsb, kfsb, parse_kfs, Verdict};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
-    let (path, json) = match parse_args(&args) {
-        Some(p) => p,
-        None => {
-            eprintln!("usage: kvasir check <file.kfs> [--json]");
-            return ExitCode::from(3);
+    match args.get(1).map(String::as_str) {
+        Some("check") => cmd_check(&args),
+        Some("convert") => cmd_convert(&args),
+        _ => {
+            eprintln!("usage: kvasir check <file.kfs|file.kfsb> [--json]");
+            eprintln!("       kvasir convert <in.kfs> <out.kfsb>");
+            ExitCode::from(3)
+        }
+    }
+}
+
+fn cmd_check(args: &[String]) -> ExitCode {
+    let json = args.iter().any(|a| a == "--json");
+    let Some(path) = args.get(2).filter(|a| *a != "--json").cloned() else {
+        eprintln!("usage: kvasir check <file.kfs|file.kfsb> [--json]");
+        return ExitCode::from(3);
+    };
+    let result = if path.ends_with(".kfsb") {
+        match std::fs::read(&path) {
+            Ok(buf) => check_kfsb(&buf),
+            Err(e) => {
+                eprintln!("kvasir: cannot read {path}: {e}");
+                return ExitCode::from(3);
+            }
+        }
+    } else {
+        match std::fs::read_to_string(&path) {
+            Ok(text) => check(&text),
+            Err(e) => {
+                eprintln!("kvasir: cannot read {path}: {e}");
+                return ExitCode::from(3);
+            }
         }
     };
-    let text = match std::fs::read_to_string(&path) {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!("kvasir: cannot read {path}: {e}");
-            return ExitCode::from(3);
-        }
-    };
-    match check(&text) {
+    match result {
         Err(oof) => {
             eprintln!("kvasir: {oof}");
             ExitCode::from(2)
@@ -67,12 +90,36 @@ fn main() -> ExitCode {
     }
 }
 
-fn parse_args(args: &[String]) -> Option<(String, bool)> {
-    if args.len() < 3 || args[1] != "check" {
-        return None;
+fn cmd_convert(args: &[String]) -> ExitCode {
+    let (Some(input), Some(output)) = (args.get(2), args.get(3)) else {
+        eprintln!("usage: kvasir convert <in.kfs> <out.kfsb>");
+        return ExitCode::from(3);
+    };
+    let text = match std::fs::read_to_string(input) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("kvasir: cannot read {input}: {e}");
+            return ExitCode::from(3);
+        }
+    };
+    // the writer-side gate: text passes the fragment gate BEFORE serialization — the schema cannot
+    // represent out-of-fragment constructs, and we refuse rather than approximate on the way in.
+    let axioms = match parse_kfs(&text) {
+        Ok(a) => a,
+        Err(oof) => {
+            eprintln!("kvasir: {oof}");
+            return ExitCode::from(2);
+        }
+    };
+    let buf = kfsb::write(&axioms, input);
+    if let Err(e) = std::fs::write(output, &buf) {
+        eprintln!("kvasir: cannot write {output}: {e}");
+        return ExitCode::from(3);
     }
-    let json = args.iter().any(|a| a == "--json");
-    args.get(2)
-        .filter(|a| *a != "--json")
-        .map(|p| (p.clone(), json))
+    println!(
+        "wrote {} axioms ({} bytes) -> {output}",
+        axioms.len(),
+        buf.len()
+    );
+    ExitCode::SUCCESS
 }

@@ -18,6 +18,10 @@ jobs:
       - name: founding vector (dual-grounding must be REFUTED, exit 1)
         run: |
           cargo run -q -p kvasir-cli -- check tests/vectors/dual_grounding.kfs --json && exit 1 || test $? -eq 1
+      - name: binary payload round-trip (convert → check .kfsb → same verdict, exit 1)
+        run: |
+          cargo run -q -p kvasir-cli -- convert tests/vectors/dual_grounding.kfs /tmp/dg.kfsb
+          cargo run -q -p kvasir-cli -- check /tmp/dg.kfsb && exit 1 || test $? -eq 1
 
   # T2 (upstream aegir #132): the differential harness — every commit re-verified against HermiT
   # (and ELK where the EL profile fits) over a regression corpus grown from upstream releases.
