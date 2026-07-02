@@ -100,6 +100,11 @@ natural next table in the same schema.
 
 ## Roadmap
 
+The governing schedule is [PARITY.md](PARITY.md) — feature parity with Konclude ∪ HermiT,
+ordered by aegir-acceleration value (clean-room: Konclude studied as a feature inventory under LGPLv3
+discipline; techniques implemented from public literature).
+
+
 - **T2** (upstream aegir #132): exact fragment measurement of the live ontology; ELK where the EL profile
   fits; the differential harness as founding CI.
 - **T3**: complete EL⁺/ALCH consequence-based saturation (rayon-parallel; join-heavy core is
