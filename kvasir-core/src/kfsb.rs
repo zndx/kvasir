@@ -92,6 +92,24 @@ pub fn read(buf: &[u8]) -> Result<Vec<Axiom>, OutOfFragment> {
                     individual: name(t.individual(), i)?,
                 }
             }
+            fb::AxiomKind::PropertyRange => {
+                let t = ax
+                    .kind_as_property_range()
+                    .ok_or_else(|| bad("union/kind mismatch"))?;
+                Axiom::PropertyRange {
+                    role: name(t.role(), i)?,
+                    range: name(t.range(), i)?,
+                }
+            }
+            fb::AxiomKind::PropertyDomain => {
+                let t = ax
+                    .kind_as_property_domain()
+                    .ok_or_else(|| bad("union/kind mismatch"))?;
+                Axiom::PropertyDomain {
+                    role: name(t.role(), i)?,
+                    domain: name(t.domain(), i)?,
+                }
+            }
             other => {
                 return Err(OutOfFragment {
                     line: i + 1,
@@ -129,6 +147,8 @@ pub fn write(axioms: &[Axiom], source: &str) -> Vec<u8> {
         Ex(u32, u32, u32),
         Dis(u32, u32),
         Assert(u32, u32),
+        Range(u32, u32),
+        Domain(u32, u32),
     }
     let ks: Vec<K> = axioms
         .iter()
@@ -156,6 +176,14 @@ pub fn write(axioms: &[Axiom], source: &str) -> Vec<u8> {
             Axiom::ClassAssertion { class, individual } => K::Assert(
                 intern(&mut ix, &mut names, class),
                 intern(&mut ix, &mut names, individual),
+            ),
+            Axiom::PropertyRange { role, range } => K::Range(
+                intern(&mut ix, &mut names, role),
+                intern(&mut ix, &mut names, range),
+            ),
+            Axiom::PropertyDomain { role, domain } => K::Domain(
+                intern(&mut ix, &mut names, role),
+                intern(&mut ix, &mut names, domain),
             ),
         })
         .collect();
@@ -214,6 +242,26 @@ pub fn write(axioms: &[Axiom], source: &str) -> Vec<u8> {
                     },
                 );
                 (fb::AxiomKind::ClassAssertion, t.as_union_value())
+            }
+            K::Range(role, range) => {
+                let t = fb::PropertyRange::create(
+                    &mut fbb,
+                    &fb::PropertyRangeArgs {
+                        role: *role,
+                        range: *range,
+                    },
+                );
+                (fb::AxiomKind::PropertyRange, t.as_union_value())
+            }
+            K::Domain(role, domain) => {
+                let t = fb::PropertyDomain::create(
+                    &mut fbb,
+                    &fb::PropertyDomainArgs {
+                        role: *role,
+                        domain: *domain,
+                    },
+                );
+                (fb::AxiomKind::PropertyDomain, t.as_union_value())
             }
         };
         axiom_offs.push(fb::Axiom::create(

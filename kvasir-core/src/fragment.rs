@@ -22,14 +22,20 @@ pub enum Axiom {
     SubClassOf { sub: Name, sup: Name },
     /// `c ≡ a₁ ⊓ a₂ ⊓ …` (genus–differentia definitions; the told direction `c ⊑ aᵢ` is v0-active)
     EquivalentToIntersection { class: Name, parts: Vec<Name> },
-    /// `c ⊑ ∃r.d` — admitted by the gate, inert at v0 (sound for refutation: fewer derivations
-    /// can only miss clashes, never invent them). Active in the T3 EL⁺ rule set.
+    /// `c ⊑ ∃r.d` — ACTIVE since P0: feeds R-domain (subject typing) and the ∃-⊥ family
+    /// (a required successor in an empty class refutes the subject).
     SubClassOfExistential { sub: Name, role: Name, filler: Name },
     /// `Disjoint(a, b)` (pairwise)
     DisjointClasses { a: Name, b: Name },
     /// `i : c` — a Types-only ABox assertion (no role assertions between individuals at v0;
     /// this is the machine-checked precondition of the upstream decomposition theorem)
     ClassAssertion { class: Name, individual: Name },
+    /// `range(r) ⊑ c` — every r-successor is a c (P0; participates in the ∃-⊥ family:
+    /// a filler jointly unsatisfiable with the range empties the successor).
+    PropertyRange { role: Name, range: Name },
+    /// `domain(r) ⊑ c` — every r-subject is a c (P0; R-domain derives `sub ⊑ c` from any
+    /// `sub ⊑ ∃r.d`, feeding the told closure and the disjointness clash join).
+    PropertyDomain { role: Name, domain: Name },
 }
 
 /// A loud, named rejection. The gate never guesses.
@@ -161,6 +167,20 @@ pub fn parse_line(line_no: usize, raw: &str) -> Result<Option<Axiom>, OutOfFragm
             Ok(Some(Axiom::ClassAssertion {
                 class: args[0].clone(),
                 individual: args[1].clone(),
+            }))
+        }
+        "PropertyRange" => {
+            arity(2, "PropertyRange <role> <class>")?;
+            Ok(Some(Axiom::PropertyRange {
+                role: args[0].clone(),
+                range: args[1].clone(),
+            }))
+        }
+        "PropertyDomain" => {
+            arity(2, "PropertyDomain <role> <class>")?;
+            Ok(Some(Axiom::PropertyDomain {
+                role: args[0].clone(),
+                domain: args[1].clone(),
             }))
         }
         other => {

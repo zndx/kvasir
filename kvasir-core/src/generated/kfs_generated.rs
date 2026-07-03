@@ -17,19 +17,21 @@ pub mod kvasir {
             since = "2.0.0",
             note = "Use associated constants instead. This will no longer be generated in 2021."
         )]
-        pub const ENUM_MAX_AXIOM_KIND: u8 = 5;
+        pub const ENUM_MAX_AXIOM_KIND: u8 = 7;
         #[deprecated(
             since = "2.0.0",
             note = "Use associated constants instead. This will no longer be generated in 2021."
         )]
         #[allow(non_camel_case_types)]
-        pub const ENUM_VALUES_AXIOM_KIND: [AxiomKind; 6] = [
+        pub const ENUM_VALUES_AXIOM_KIND: [AxiomKind; 8] = [
             AxiomKind::NONE,
             AxiomKind::SubClassOf,
             AxiomKind::EquivalentToIntersection,
             AxiomKind::SubClassOfExistential,
             AxiomKind::DisjointClasses,
             AxiomKind::ClassAssertion,
+            AxiomKind::PropertyRange,
+            AxiomKind::PropertyDomain,
         ];
 
         #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -43,9 +45,11 @@ pub mod kvasir {
             pub const SubClassOfExistential: Self = Self(3);
             pub const DisjointClasses: Self = Self(4);
             pub const ClassAssertion: Self = Self(5);
+            pub const PropertyRange: Self = Self(6);
+            pub const PropertyDomain: Self = Self(7);
 
             pub const ENUM_MIN: u8 = 0;
-            pub const ENUM_MAX: u8 = 5;
+            pub const ENUM_MAX: u8 = 7;
             pub const ENUM_VALUES: &'static [Self] = &[
                 Self::NONE,
                 Self::SubClassOf,
@@ -53,6 +57,8 @@ pub mod kvasir {
                 Self::SubClassOfExistential,
                 Self::DisjointClasses,
                 Self::ClassAssertion,
+                Self::PropertyRange,
+                Self::PropertyDomain,
             ];
             /// Returns the variant's name or "" if unknown.
             pub fn variant_name(self) -> Option<&'static str> {
@@ -63,6 +69,8 @@ pub mod kvasir {
                     Self::SubClassOfExistential => Some("SubClassOfExistential"),
                     Self::DisjointClasses => Some("DisjointClasses"),
                     Self::ClassAssertion => Some("ClassAssertion"),
+                    Self::PropertyRange => Some("PropertyRange"),
+                    Self::PropertyDomain => Some("PropertyDomain"),
                     _ => None,
                 }
             }
@@ -799,6 +807,262 @@ pub mod kvasir {
                 ds.finish()
             }
         }
+        pub enum PropertyRangeOffset {}
+        #[derive(Copy, Clone, PartialEq)]
+
+        pub struct PropertyRange<'a> {
+            pub _tab: ::flatbuffers::Table<'a>,
+        }
+
+        impl<'a> ::flatbuffers::Follow<'a> for PropertyRange<'a> {
+            type Inner = PropertyRange<'a>;
+            #[inline]
+            unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+                Self {
+                    _tab: unsafe { ::flatbuffers::Table::new(buf, loc) },
+                }
+            }
+        }
+
+        impl<'a> PropertyRange<'a> {
+            pub const VT_ROLE: ::flatbuffers::VOffsetT = 4;
+            pub const VT_RANGE: ::flatbuffers::VOffsetT = 6;
+
+            #[inline]
+            pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+                PropertyRange { _tab: table }
+            }
+            #[allow(unused_mut)]
+            pub fn create<
+                'bldr: 'args,
+                'args: 'mut_bldr,
+                'mut_bldr,
+                A: ::flatbuffers::Allocator + 'bldr,
+            >(
+                _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+                args: &'args PropertyRangeArgs,
+            ) -> ::flatbuffers::WIPOffset<PropertyRange<'bldr>> {
+                let mut builder = PropertyRangeBuilder::new(_fbb);
+                builder.add_range(args.range);
+                builder.add_role(args.role);
+                builder.finish()
+            }
+
+            #[inline]
+            pub fn role(&self) -> u32 {
+                // Safety:
+                // Created from valid Table for this object
+                // which contains a valid value in this slot
+                unsafe {
+                    self._tab
+                        .get::<u32>(PropertyRange::VT_ROLE, Some(0))
+                        .unwrap()
+                }
+            }
+            #[inline]
+            pub fn range(&self) -> u32 {
+                // Safety:
+                // Created from valid Table for this object
+                // which contains a valid value in this slot
+                unsafe {
+                    self._tab
+                        .get::<u32>(PropertyRange::VT_RANGE, Some(0))
+                        .unwrap()
+                }
+            }
+        }
+
+        impl ::flatbuffers::Verifiable for PropertyRange<'_> {
+            #[inline]
+            fn run_verifier(
+                v: &mut ::flatbuffers::Verifier,
+                pos: usize,
+            ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+                v.visit_table(pos)?
+                    .visit_field::<u32>("role", Self::VT_ROLE, false)?
+                    .visit_field::<u32>("range", Self::VT_RANGE, false)?
+                    .finish();
+                Ok(())
+            }
+        }
+        pub struct PropertyRangeArgs {
+            pub role: u32,
+            pub range: u32,
+        }
+        impl<'a> Default for PropertyRangeArgs {
+            #[inline]
+            fn default() -> Self {
+                PropertyRangeArgs { role: 0, range: 0 }
+            }
+        }
+
+        pub struct PropertyRangeBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+            fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+            start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+        }
+        impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> PropertyRangeBuilder<'a, 'b, A> {
+            #[inline]
+            pub fn add_role(&mut self, role: u32) {
+                self.fbb_.push_slot::<u32>(PropertyRange::VT_ROLE, role, 0);
+            }
+            #[inline]
+            pub fn add_range(&mut self, range: u32) {
+                self.fbb_
+                    .push_slot::<u32>(PropertyRange::VT_RANGE, range, 0);
+            }
+            #[inline]
+            pub fn new(
+                _fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+            ) -> PropertyRangeBuilder<'a, 'b, A> {
+                let start = _fbb.start_table();
+                PropertyRangeBuilder {
+                    fbb_: _fbb,
+                    start_: start,
+                }
+            }
+            #[inline]
+            pub fn finish(self) -> ::flatbuffers::WIPOffset<PropertyRange<'a>> {
+                let o = self.fbb_.end_table(self.start_);
+                ::flatbuffers::WIPOffset::new(o.value())
+            }
+        }
+
+        impl ::core::fmt::Debug for PropertyRange<'_> {
+            fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+                let mut ds = f.debug_struct("PropertyRange");
+                ds.field("role", &self.role());
+                ds.field("range", &self.range());
+                ds.finish()
+            }
+        }
+        pub enum PropertyDomainOffset {}
+        #[derive(Copy, Clone, PartialEq)]
+
+        pub struct PropertyDomain<'a> {
+            pub _tab: ::flatbuffers::Table<'a>,
+        }
+
+        impl<'a> ::flatbuffers::Follow<'a> for PropertyDomain<'a> {
+            type Inner = PropertyDomain<'a>;
+            #[inline]
+            unsafe fn follow(buf: &'a [u8], loc: usize) -> Self::Inner {
+                Self {
+                    _tab: unsafe { ::flatbuffers::Table::new(buf, loc) },
+                }
+            }
+        }
+
+        impl<'a> PropertyDomain<'a> {
+            pub const VT_ROLE: ::flatbuffers::VOffsetT = 4;
+            pub const VT_DOMAIN: ::flatbuffers::VOffsetT = 6;
+
+            #[inline]
+            pub unsafe fn init_from_table(table: ::flatbuffers::Table<'a>) -> Self {
+                PropertyDomain { _tab: table }
+            }
+            #[allow(unused_mut)]
+            pub fn create<
+                'bldr: 'args,
+                'args: 'mut_bldr,
+                'mut_bldr,
+                A: ::flatbuffers::Allocator + 'bldr,
+            >(
+                _fbb: &'mut_bldr mut ::flatbuffers::FlatBufferBuilder<'bldr, A>,
+                args: &'args PropertyDomainArgs,
+            ) -> ::flatbuffers::WIPOffset<PropertyDomain<'bldr>> {
+                let mut builder = PropertyDomainBuilder::new(_fbb);
+                builder.add_domain(args.domain);
+                builder.add_role(args.role);
+                builder.finish()
+            }
+
+            #[inline]
+            pub fn role(&self) -> u32 {
+                // Safety:
+                // Created from valid Table for this object
+                // which contains a valid value in this slot
+                unsafe {
+                    self._tab
+                        .get::<u32>(PropertyDomain::VT_ROLE, Some(0))
+                        .unwrap()
+                }
+            }
+            #[inline]
+            pub fn domain(&self) -> u32 {
+                // Safety:
+                // Created from valid Table for this object
+                // which contains a valid value in this slot
+                unsafe {
+                    self._tab
+                        .get::<u32>(PropertyDomain::VT_DOMAIN, Some(0))
+                        .unwrap()
+                }
+            }
+        }
+
+        impl ::flatbuffers::Verifiable for PropertyDomain<'_> {
+            #[inline]
+            fn run_verifier(
+                v: &mut ::flatbuffers::Verifier,
+                pos: usize,
+            ) -> Result<(), ::flatbuffers::InvalidFlatbuffer> {
+                v.visit_table(pos)?
+                    .visit_field::<u32>("role", Self::VT_ROLE, false)?
+                    .visit_field::<u32>("domain", Self::VT_DOMAIN, false)?
+                    .finish();
+                Ok(())
+            }
+        }
+        pub struct PropertyDomainArgs {
+            pub role: u32,
+            pub domain: u32,
+        }
+        impl<'a> Default for PropertyDomainArgs {
+            #[inline]
+            fn default() -> Self {
+                PropertyDomainArgs { role: 0, domain: 0 }
+            }
+        }
+
+        pub struct PropertyDomainBuilder<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> {
+            fbb_: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+            start_: ::flatbuffers::WIPOffset<::flatbuffers::TableUnfinishedWIPOffset>,
+        }
+        impl<'a: 'b, 'b, A: ::flatbuffers::Allocator + 'a> PropertyDomainBuilder<'a, 'b, A> {
+            #[inline]
+            pub fn add_role(&mut self, role: u32) {
+                self.fbb_.push_slot::<u32>(PropertyDomain::VT_ROLE, role, 0);
+            }
+            #[inline]
+            pub fn add_domain(&mut self, domain: u32) {
+                self.fbb_
+                    .push_slot::<u32>(PropertyDomain::VT_DOMAIN, domain, 0);
+            }
+            #[inline]
+            pub fn new(
+                _fbb: &'b mut ::flatbuffers::FlatBufferBuilder<'a, A>,
+            ) -> PropertyDomainBuilder<'a, 'b, A> {
+                let start = _fbb.start_table();
+                PropertyDomainBuilder {
+                    fbb_: _fbb,
+                    start_: start,
+                }
+            }
+            #[inline]
+            pub fn finish(self) -> ::flatbuffers::WIPOffset<PropertyDomain<'a>> {
+                let o = self.fbb_.end_table(self.start_);
+                ::flatbuffers::WIPOffset::new(o.value())
+            }
+        }
+
+        impl ::core::fmt::Debug for PropertyDomain<'_> {
+            fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+                let mut ds = f.debug_struct("PropertyDomain");
+                ds.field("role", &self.role());
+                ds.field("domain", &self.domain());
+                ds.finish()
+            }
+        }
         pub enum AxiomOffset {}
         #[derive(Copy, Clone, PartialEq)]
 
@@ -938,6 +1202,34 @@ pub mod kvasir {
                     None
                 }
             }
+
+            #[inline]
+            #[allow(non_snake_case)]
+            pub fn kind_as_property_range(&self) -> Option<PropertyRange<'a>> {
+                if self.kind_type() == AxiomKind::PropertyRange {
+                    let u = self.kind();
+                    // Safety:
+                    // Created from a valid Table for this object
+                    // Which contains a valid union in this slot
+                    Some(unsafe { PropertyRange::init_from_table(u) })
+                } else {
+                    None
+                }
+            }
+
+            #[inline]
+            #[allow(non_snake_case)]
+            pub fn kind_as_property_domain(&self) -> Option<PropertyDomain<'a>> {
+                if self.kind_type() == AxiomKind::PropertyDomain {
+                    let u = self.kind();
+                    // Safety:
+                    // Created from a valid Table for this object
+                    // Which contains a valid union in this slot
+                    Some(unsafe { PropertyDomain::init_from_table(u) })
+                } else {
+                    None
+                }
+            }
         }
 
         impl ::flatbuffers::Verifiable for Axiom<'_> {
@@ -954,6 +1246,8 @@ pub mod kvasir {
           AxiomKind::SubClassOfExistential => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<SubClassOfExistential>>("AxiomKind::SubClassOfExistential", pos),
           AxiomKind::DisjointClasses => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<DisjointClasses>>("AxiomKind::DisjointClasses", pos),
           AxiomKind::ClassAssertion => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<ClassAssertion>>("AxiomKind::ClassAssertion", pos),
+          AxiomKind::PropertyRange => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<PropertyRange>>("AxiomKind::PropertyRange", pos),
+          AxiomKind::PropertyDomain => v.verify_union_variant::<::flatbuffers::ForwardsUOffset<PropertyDomain>>("AxiomKind::PropertyDomain", pos),
           _ => Ok(()),
         }
      })?
@@ -1058,6 +1352,26 @@ pub mod kvasir {
                     }
                     AxiomKind::ClassAssertion => {
                         if let Some(x) = self.kind_as_class_assertion() {
+                            ds.field("kind", &x)
+                        } else {
+                            ds.field(
+                                "kind",
+                                &"InvalidFlatbuffer: Union discriminant does not match value.",
+                            )
+                        }
+                    }
+                    AxiomKind::PropertyRange => {
+                        if let Some(x) = self.kind_as_property_range() {
+                            ds.field("kind", &x)
+                        } else {
+                            ds.field(
+                                "kind",
+                                &"InvalidFlatbuffer: Union discriminant does not match value.",
+                            )
+                        }
+                    }
+                    AxiomKind::PropertyDomain => {
+                        if let Some(x) = self.kind_as_property_domain() {
                             ds.field("kind", &x)
                         } else {
                             ds.field(

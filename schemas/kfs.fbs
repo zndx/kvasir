@@ -26,6 +26,9 @@ table EquivalentToIntersection { lhs: uint32; parts: [uint32] (required); }
 table SubClassOfExistential { sub: uint32; role: uint32; filler: uint32; }
 table DisjointClasses { a: uint32; b: uint32; }
 table ClassAssertion { cls: uint32; individual: uint32; }
+// P0 (loop refuter): role typing — a visible, reviewed widening of the fragment
+table PropertyRange { role: uint32; range: uint32; }
+table PropertyDomain { role: uint32; domain: uint32; }
 
 union AxiomKind {
   SubClassOf,
@@ -33,6 +36,8 @@ union AxiomKind {
   SubClassOfExistential,
   DisjointClasses,
   ClassAssertion,
+  PropertyRange,
+  PropertyDomain,
 }
 
 table Axiom { kind: AxiomKind (required); }

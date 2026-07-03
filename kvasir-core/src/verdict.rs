@@ -33,16 +33,67 @@ pub enum Rule {
     RDisj,
     /// `i : c`, `Unsat(c)` ⇒ `KB refuted via i`.
     RInst,
+    /// `c ⊑ ∃r.d`, `domain(r) ⊑ e` ⇒ `c ⊑ e` (P0 — any r-subject is in r's domain).
+    RDomain,
+    /// `d ⊓ e ⊑ ⊥`, established either from `Disjoint(a, b)` with `d ⊑ a`, `e ⊑ b`
+    /// (reflexive sides admissible, either orientation) or from `Unsat(d)`/`Unsat(e)`
+    /// alone (`d ⊓ e ⊑ d ⊑ ⊥`) ⇒ `PairUnsat(d, e)` (P0).
+    RConjUnsat,
+    /// `c ⊑ ∃r.d`, `Unsat(d)` ⇒ `Unsat(c)` — a required successor in an empty class (P0).
+    RExistBot,
+    /// `c ⊑ ∃r.d`, `range(r) ⊑ e`, `PairUnsat(d, e)` ⇒ `Unsat(c)` — the successor must be
+    /// in `d ⊓ e`, which is empty (P0; the JointInformationEnvironment clash shape).
+    RExistRangeBot,
+    /// `c ⊑ d`, `Unsat(d)` ⇒ `Unsat(c)` — ⊥ propagates down the told hierarchy (P0;
+    /// disjointness-sourced unsat already reaches subclasses via the closure, but
+    /// ∃-sourced unsat needs this explicit step).
+    RSubUnsat,
 }
 
 /// The derived-fact language (deliberately tiny).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Fact {
-    Sub { sub: Name, sup: Name },
-    Disjoint { a: Name, b: Name },
-    Assert { class: Name, individual: Name },
-    Unsat { class: Name },
-    KbRefuted { individual: Name, class: Name },
+    Sub {
+        sub: Name,
+        sup: Name,
+    },
+    Disjoint {
+        a: Name,
+        b: Name,
+    },
+    Assert {
+        class: Name,
+        individual: Name,
+    },
+    Unsat {
+        class: Name,
+    },
+    KbRefuted {
+        individual: Name,
+        class: Name,
+    },
+    /// `sub ⊑ ∃role.filler` as a fact (input-only; no rule derives new existentials at P0).
+    Ex {
+        sub: Name,
+        role: Name,
+        filler: Name,
+    },
+    /// `range(role) ⊑ range` (input-only).
+    Range {
+        role: Name,
+        range: Name,
+    },
+    /// `domain(role) ⊑ domain` (input-only).
+    Domain {
+        role: Name,
+        domain: Name,
+    },
+    /// `a ⊓ b ⊑ ⊥` — the joint-unsatisfiability of a pair (the upstream conjunction-probe
+    /// shape, derived natively).
+    PairUnsat {
+        a: Name,
+        b: Name,
+    },
 }
 
 /// A proof DAG: topologically ordered steps (every premise id < the step's own id).
