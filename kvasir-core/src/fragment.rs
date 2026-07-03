@@ -107,8 +107,16 @@ const REFUSED: &[(&str, &str)] = &[
 ];
 
 /// Parse one KFS line through the gate. `Ok(None)` = blank/comment.
+///
+/// A comment starts at a `#` at line start or preceded by whitespace — NOT inside a token:
+/// IRIs (`<https://…#LocalName>`) are the actual payload of upstream fact streams, and a naive
+/// split-on-`#` truncates every one of them into an arity error (measured: the founding-artifact
+/// lowering, 8,099 axioms, 100% refused).
 pub fn parse_line(line_no: usize, raw: &str) -> Result<Option<Axiom>, OutOfFragment> {
-    let line = raw.split('#').next().unwrap_or("").trim();
+    let comment_at = raw.char_indices().find_map(|(i, c)| {
+        (c == '#' && (i == 0 || raw[..i].ends_with(char::is_whitespace))).then_some(i)
+    });
+    let line = raw[..comment_at.unwrap_or(raw.len())].trim();
     if line.is_empty() {
         return Ok(None);
     }
@@ -245,6 +253,20 @@ ClassAssertion <dual> <i_sample_01>
     fn refuses_unknown_constructs_loudly() {
         let err = parse_kfs("HasKey <a> <p>").expect_err("must refuse");
         assert_eq!(err.construct, "HasKey");
+    }
+
+    #[test]
+    fn iri_fragments_are_not_comments() {
+        // '#' inside a token is payload (IRIs); only line-start / whitespace-preceded '#' comments
+        let doc = "\
+SubClassOf <https://signals.zndx.org/sdg#A> <https://signals.zndx.org/sdg#B>  # trailing comment
+# full-line comment
+DisjointClasses <https://signals.zndx.org/sdg#B> <https://signals.zndx.org/sdg#C>
+";
+        let axs = parse_kfs(doc).expect("IRI fragments must survive the comment stripper");
+        assert_eq!(axs.len(), 2);
+        assert!(matches!(&axs[0], Axiom::SubClassOf { sub, sup }
+            if sub.contains("sdg#A") && sup.contains("sdg#B")));
     }
 
     #[test]
