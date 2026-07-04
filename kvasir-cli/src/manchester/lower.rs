@@ -15,6 +15,10 @@
 //!   - frame `rdfs:label` → `@Label` (unquotable text skipped-with-count, never sanitized)
 //!   - restrictions with an `xsd:` filler → `@Attribute`
 //!   - `exactly n` → `@Cardinality n n`; `min n>1` → `n *`; `max n` → `0 n`
+//!   - `max`/`only` with a named class filler → `@Relation` (a schema-real but NOT
+//!     existentially-forced object relation — an optional FK; without this such
+//!     relations vanish from the DDL entirely, a projection leak)
+//!   - DataProperty `skos:definition` enumerating a closed set → `@Enum`
 //!
 //! All entity tokens canonicalize to FULL IRIs via the document's own prefix
 //! declarations (one class, one name, across tiers — the split-name lesson).
@@ -119,6 +123,7 @@ struct Ctx<'a> {
     seen_attrs: BTreeSet<(String, String)>,
     seen_cards: BTreeSet<(String, String)>,
     seen_enums: BTreeSet<String>,
+    seen_rels: BTreeSet<(String, String)>,
 }
 
 impl<'a> Ctx<'a> {
@@ -172,11 +177,27 @@ impl<'a> Ctx<'a> {
                     self.skip("expr:min0");
                 }
             }
-            Expr::Max { property, n, .. } => {
+            Expr::Max { property, n, filler } => {
                 self.card(subject, property, 0, Some(*n));
+                // a max relation is schema-real (an optional/nullable FK) but not
+                // existentially forced — the annotation tier carries it so the DDL
+                // planner renders the column (leak-2 fix: without this the relation
+                // vanished entirely). max 0 asserts absence: no relation.
+                if *n > 0 {
+                    if let Some(Expr::Named(f)) = filler.as_deref() {
+                        self.relation(subject, property, f);
+                    }
+                }
                 self.skip(if *n == 0 { "expr:max0" } else { "expr:max" });
             }
-            Expr::Only { .. } => self.skip("expr:only"),
+            Expr::Only { property, filler } => {
+                // an all-values-from restriction types an (optional) relation; carry it
+                // as a schema-real nullable FK too.
+                if let Expr::Named(f) = filler.as_ref() {
+                    self.relation(subject, property, f);
+                }
+                self.skip("expr:only");
+            }
             Expr::HasValue { .. } => self.skip("expr:value"),
             Expr::Not(_) => self.skip("expr:not"),
             Expr::Or(_) => self.skip("expr:or"),
@@ -208,6 +229,19 @@ impl<'a> Ctx<'a> {
                 }
             }
             _ => self.skip("expr:nested"),
+        }
+    }
+
+    /// A schema-real but non-existential object relation (from `max`/`only`) → @Relation.
+    /// xsd fillers are attributes, not relations, and never reach here.
+    fn relation(&mut self, subject: &str, property: &str, filler: &str) {
+        let p = self.x(property);
+        let f = self.x(filler);
+        if f.starts_with("xsd:") || f.starts_with(XSD_NS) {
+            return;
+        }
+        if self.seen_rels.insert((subject.to_string(), p.clone())) {
+            self.ann(format!("@Relation <{subject}> <{p}> <{f}>"));
         }
     }
 
@@ -245,6 +279,7 @@ pub fn lower(doc: &Document) -> Lowering {
         seen_attrs: BTreeSet::new(),
         seen_cards: BTreeSet::new(),
         seen_enums: BTreeSet::new(),
+        seen_rels: BTreeSet::new(),
     };
 
     // top-level DisjointClasses blocks — n-ary lowers to all pairs (entailed)
@@ -437,6 +472,21 @@ Individual: sdg:i_role_01
         let low = lower(&doc);
         assert!(low.kfs.contains("@Enum <https://x.org/sdg#hasStatus> \"draft\" \"final\" \"retired\""),
             "{}", low.kfs);
+    }
+
+    #[test]
+    fn max_and_only_relations_emit_relation_annotations() {
+        let (doc, _) = parse_document(
+            "Prefix: sdg: <https://x.org/sdg#>\nClass: sdg:A SubClassOf: sdg:derivedFrom max 1 sdg:B, sdg:typedAs only sdg:C\n",
+        );
+        let low = lower(&doc);
+        assert!(low.kfs.contains("@Relation <https://x.org/sdg#A> <https://x.org/sdg#derivedFrom> <https://x.org/sdg#B>"), "{}", low.kfs);
+        assert!(low.kfs.contains("@Relation <https://x.org/sdg#A> <https://x.org/sdg#typedAs> <https://x.org/sdg#C>"), "{}", low.kfs);
+        // still no reasoning-tier existential for max/only (unsound to entail ∃)
+        assert!(!low.kfs.contains("SubClassOfExistential"));
+        // max 0 asserts absence → no relation
+        let (doc0, _) = parse_document("Prefix: sdg: <https://x.org/sdg#>\nClass: sdg:A SubClassOf: sdg:p max 0 sdg:B\n");
+        assert!(!lower(&doc0).kfs.contains("@Relation"));
     }
 
     #[test]

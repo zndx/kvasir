@@ -70,6 +70,12 @@ pub fn emit(axioms: &[Axiom], annotations: &[Annotation]) -> String {
                 enums.insert(prop, values);
             }
             Annotation::Label { .. } => {}
+            Annotation::Relation { class, prop, target } => {
+                // a schema-real non-existential relation → sh:class, no minCount
+                // (optional). Merge into the same ext index as existentials; the
+                // per-path dedup below keeps a class/datatype constraint if one exists.
+                exts.entry(class).or_default().push((prop, target));
+            }
         }
     }
 

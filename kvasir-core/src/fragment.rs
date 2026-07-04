@@ -61,6 +61,12 @@ pub enum Annotation {
     Enum { prop: Name, values: Vec<String> },
     /// `@Label <entity> "text"` — display text (semantic-register COMMENT payload only)
     Label { entity: Name, text: String },
+    /// `@Relation <class> <prop> <target>` — an object-property relation that is NOT
+    /// existentially forced (a `max`/`only` restriction). The relation is schema-real
+    /// (an optional/nullable FK) but carries no `∃`, so it cannot ride the reasoning
+    /// tier's `SubClassOfExistential`; the annotation tier is exactly where
+    /// schema-real-but-not-reasoning-forced facts belong.
+    Relation { class: Name, prop: Name, target: Name },
 }
 
 /// One parsed KFS line, tier-tagged. The reasoning view (`parse_kfs`) sees only `Axiom`s.
@@ -331,10 +337,24 @@ fn parse_annotation(line_no: usize, rest: &str) -> Result<Annotation, OutOfFragm
                 text: vals.remove(0),
             })
         }
+        "Relation" => {
+            let args: Vec<String> = tail.split_whitespace().map(strip_angles).collect();
+            if args.len() != 3 {
+                return Err(err(format!(
+                    "@Relation <class> <prop> <target> expects 3 arguments, got {}",
+                    args.len()
+                )));
+            }
+            Ok(Annotation::Relation {
+                class: args[0].clone(),
+                prop: args[1].clone(),
+                target: args[2].clone(),
+            })
+        }
         other => Err(OutOfFragment {
             line: line_no,
             construct: format!("@{other}"),
-            detail: "unknown annotation form — the tier admits only @Attribute/@Cardinality/@Enum/@Label"
+            detail: "unknown annotation form — the tier admits only @Attribute/@Cardinality/@Enum/@Label/@Relation"
                 .to_string(),
         }),
     }
@@ -479,6 +499,18 @@ DisjointClasses <a> <c>
         assert!(
             matches!(&annotations[2], Annotation::Enum { values, .. } if values[1] == "in progress")
         );
+    }
+
+    #[test]
+    fn relation_annotation_routes_like_the_rest() {
+        let doc = "SubClassOf <a> <b>\n@Relation <a> <sdg:derivedFrom> <c>\n";
+        let (axioms, annotations) = parse_kfs_tiered(doc).unwrap();
+        assert_eq!(axioms.len(), 1); // reasoning tier unchanged
+        assert!(matches!(
+            &annotations[0],
+            Annotation::Relation { class, target, .. } if class == "a" && target == "c"
+        ));
+        assert!(parse_kfs("@Relation <a> <p>").is_err()); // arity
     }
 
     #[test]

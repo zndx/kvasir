@@ -223,6 +223,15 @@ pub fn plan(
             Annotation::Label { entity, text } => {
                 labels.entry(entity).or_insert((text, c));
             }
+            Annotation::Relation { class, prop, target } => {
+                // a schema-real, non-existential relation (max/only) — a nullable FK.
+                // Merge into the same ext index the existentials feed; the per-property
+                // dedup in rollup keeps an existential (NOT NULL) winning over a bare
+                // @Relation when both name the property, and @Cardinality (max 1) makes
+                // the column nullable regardless (min defaults to 0 for @Relation-only).
+                exts.entry(class).or_default().push((prop, target, c));
+                cards.entry((class, prop)).or_insert((0, None, c));
+            }
         }
     }
 
@@ -254,7 +263,12 @@ pub fn plan(
 
     struct Rolled<'a> {
         attrs: Vec<(&'a str, &'a str, Vec<usize>)>, // prop, xsd, cites
-        exts: Vec<(&'a str, &'a str, Vec<usize>)>,  // prop, target, cites
+        // prop, target, cites, HOLDER (the class the existential was declared on — the
+        // @Cardinality annotation is keyed there, so a subclass's inherited relation
+        // must resolve its bound at the holder, not at the subclass; else min-2 etc.
+        // silently downgrades to a single FK on every subclass — the projection leak
+        // the falsification test caught).
+        exts: Vec<(&'a str, &'a str, Vec<usize>, &'a str)>,
     }
     let mut rolled: BTreeMap<&str, Rolled> = BTreeMap::new();
     for class in &all_classes {
@@ -267,7 +281,7 @@ pub fn plan(
         }
         for (p, t, c) in exts.get(class).map(|v| v.as_slice()).unwrap_or(&[]) {
             if seen_prop.insert(p) {
-                r.exts.push((p, t, vec![*c]));
+                r.exts.push((p, t, vec![*c], class));
             }
         }
         for (anc, path) in ancestors(class) {
@@ -286,7 +300,7 @@ pub fn plan(
                 if seen_prop.insert(p) {
                     let mut cites = vec![*c];
                     cites.extend(&path);
-                    r.exts.push((p, t, cites));
+                    r.exts.push((p, t, cites, key));
                 }
             }
         }
@@ -302,7 +316,7 @@ pub fn plan(
     // FK targets need a table to point at; un-elected targets become bare reference tables
     let mut reference: BTreeSet<&str> = BTreeSet::new();
     for class in &elected {
-        for (_, t, _) in &rolled[class].exts {
+        for (_, t, _, _) in &rolled[class].exts {
             if !elected.contains(t) {
                 reference.insert(t);
             }
@@ -406,7 +420,7 @@ pub fn plan(
             }
         }
 
-        for (p, t, cites) in &r.exts {
+        for (p, t, cites, holder) in &r.exts {
             let mut cites = cites.clone();
             if let Some((rng, rc)) = ranges.get(*p) {
                 cites.push(*rc);
@@ -421,8 +435,10 @@ pub fn plan(
                     ));
                 }
             }
+            // resolve the bound at the HOLDER (leak-1 fix): a subclass inherits the
+            // parent's @Cardinality, so min-2 stays a junction on the subclass too.
             let bounds = cards
-                .get(&(*class, *p))
+                .get(&(*holder, *p))
                 .copied()
                 .unwrap_or((1, None, 0));
             let (min, max, bc) = bounds;
@@ -603,5 +619,48 @@ PropertyDomain <s#inheresIn> <s#Role>
         assert!(p.tables.iter().any(|t| t.name == "bearer" && t.columns.len() == 1));
         let (stmts, ok) = render_and_check(&p);
         assert!(ok, "sqlparser must accept every rendered statement:\n{}", stmts.join(";\n"));
+    }
+
+    // The falsification test made permanent: EVERY upstream richness form must project
+    // through the toolchain — else "adds no width by design" is false (RH, 2026-07-04).
+    const ENRICHED: &str = "\
+SubClassOf <s#Blood> <s#Sample>
+SubClassOfExistential <s#Sample> <s#storedIn> <s#Freezer>
+@Attribute <s#Sample> <s#hasBarcode> <http://www.w3.org/2001/XMLSchema#string>
+@Cardinality <s#Sample> <s#storedIn> 1 1
+@Cardinality <s#Sample> <s#testedIn> 2 *
+SubClassOfExistential <s#Sample> <s#testedIn> <s#Assay>
+@Relation <s#Sample> <s#derivedFrom> <s#Subject>
+@Cardinality <s#Sample> <s#derivedFrom> 0 1
+";
+
+    #[test]
+    fn leak1_cardinality_rolls_up_through_inheritance() {
+        // min-2 on the parent must stay a JUNCTION on the subclass, not downgrade to a FK
+        let (ax, an) = parse_kfs_tiered(ENRICHED).unwrap();
+        let p = plan(&ax, &an, &(1..=ax.len()).collect::<Vec<_>>(), &(1..=an.len()).collect::<Vec<_>>());
+        assert!(p.junctions.iter().any(|j| j.subject_table == "sample" && j.prop.ends_with("testedIn")));
+        assert!(
+            p.junctions.iter().any(|j| j.subject_table == "blood" && j.prop.ends_with("testedIn")),
+            "the subclass must inherit the many-to-many as a junction, not a single FK"
+        );
+        assert!(!p.tables.iter().any(|t| t.name == "blood" && t.columns.iter().any(|c| c.name == "tested_in")));
+    }
+
+    #[test]
+    fn leak2_max_only_relations_render_as_nullable_fks() {
+        // @Relation (max/only — schema-real, not existentially forced) → a NULLABLE FK,
+        // inherited by the subclass; without this the relation vanished entirely
+        let (ax, an) = parse_kfs_tiered(ENRICHED).unwrap();
+        let p = plan(&ax, &an, &(1..=ax.len()).collect::<Vec<_>>(), &(1..=an.len()).collect::<Vec<_>>());
+        for tbl in ["sample", "blood"] {
+            let t = p.tables.iter().find(|t| t.name == tbl).unwrap();
+            let df = t.columns.iter().find(|c| c.name == "derived_from")
+                .unwrap_or_else(|| panic!("{tbl} must carry the max-1 relation as a column"));
+            assert!(df.nullable, "a max-1 relation is an OPTIONAL FK");
+            assert!(t.fks.iter().any(|f| f.column == "derived_from" && f.target_table == "subject"));
+        }
+        let (_, ok) = render_and_check(&p);
+        assert!(ok);
     }
 }
