@@ -14,6 +14,7 @@
 //! uninterruptible in-process tableau. `.kfsb` is the payload-layer FlatBuffers front-end (Kudu-style:
 //! bulk data zero-copy; envelope protocols unchanged) — dispatched by extension.
 
+mod census;
 mod ddl;
 mod manchester;
 mod verbalise;
@@ -30,15 +31,66 @@ fn main() -> ExitCode {
         Some("lower") => cmd_lower(&args),
         Some("ddl") => cmd_ddl(&args),
         Some("verbalise") => cmd_verbalise(&args),
+        Some("census") => cmd_census(&args),
         _ => {
             eprintln!("usage: kvasir check <file.kfs|file.kfsb> [--json]");
             eprintln!("       kvasir convert <in.kfs> <out.kfsb>");
             eprintln!("       kvasir lower <file.omn> [--json]");
             eprintln!("       kvasir ddl <file.omn|file.kfs> [--sql]");
             eprintln!("       kvasir verbalise <file.omn>");
+            eprintln!("       kvasir census <file.omn|file.kfs>");
             ExitCode::from(3)
         }
     }
+}
+
+/// The PREFLIGHT instrument: what this ontology can support, before running ddl.
+/// Diagnostic posture — inconsistency is a REPORTED FIELD here, not a refusal.
+fn cmd_census(args: &[String]) -> ExitCode {
+    let Some(path) = args.get(2).filter(|a| !a.starts_with("--")).cloned() else {
+        eprintln!("usage: kvasir census <file.omn|file.kfs>");
+        return ExitCode::from(3);
+    };
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("kvasir: cannot read {path}: {e}");
+            return ExitCode::from(3);
+        }
+    };
+    let (kfs, src, n_issues) = if path.ends_with(".omn") || path.ends_with(".owl") {
+        let (doc, issues) = manchester::parse_document(&text);
+        for issue in &issues {
+            eprintln!("kvasir census: {issue}");
+        }
+        let low = manchester::lower(&doc);
+        (low.kfs, low.src_lines, issues.len())
+    } else {
+        (text.clone(), Vec::new(), 0)
+    };
+    let (axioms, annotations) = match parse_kfs_tiered(&kfs) {
+        Ok(t) => t,
+        Err(oof) => {
+            eprintln!("kvasir: {oof}");
+            return ExitCode::from(2);
+        }
+    };
+    let (no_clash, n_unsat) = match saturate(&axioms) {
+        Verdict::Refuted { unsat_classes, .. } => (false, unsat_classes.len()),
+        Verdict::NoClashFound { .. } => (true, 0),
+    };
+    // residue: re-derive the lowering skip counts for .omn; .kfs has no lowering residue
+    let residue = if path.ends_with(".omn") || path.ends_with(".owl") {
+        let (doc, _) = manchester::parse_document(&text);
+        manchester::lower(&doc).skipped
+    } else {
+        Default::default()
+    };
+    let (ax_cite, ann_cite) = src.split_at(axioms.len().min(src.len()));
+    let plan = ddl::plan(&axioms, &annotations, ax_cite, ann_cite);
+    let c = census::census(&plan, &residue, n_issues, no_clash, n_unsat);
+    println!("{}", serde_json::to_string_pretty(&c).unwrap());
+    ExitCode::SUCCESS
 }
 
 /// Manchester → per-class multi-frame verbalisations (JSON). The corpus-side artifact;

@@ -43,6 +43,66 @@ fn is_label_prop(tok: &str, doc: &Document) -> bool {
     tok == "rdfs:label" || doc.expand(tok).ends_with("rdf-schema#label")
 }
 
+fn is_definition_prop(tok: &str, doc: &Document) -> bool {
+    tok == "skos:definition" || doc.expand(tok).ends_with("skos/core#definition")
+}
+
+/// Port of aegir's `rows.parse_enum_from_definition` (the Python differential twin —
+/// which additionally consults a curated generic-token stop set): a closed value set
+/// from a definition, via a non-illustrative parenthetical list ("(pending / running /
+/// complete)") or an explicit "one of|value(s)|state(s)|status(es): a, b, c" cue.
+/// Illustrative parentheticals (e.g./i.e./such as/including/for example) never fire.
+fn parse_enum_from_definition(defn: &str) -> Option<Vec<String>> {
+    let mut cand: Option<String> = None;
+    let mut rest = defn;
+    while let Some(open) = rest.find('(') {
+        let Some(close_rel) = rest[open + 1..].find(')') else { break };
+        let grp = rest[open + 1..open + 1 + close_rel].trim();
+        let low = grp.to_ascii_lowercase();
+        let illustrative = ["e.g", "i.e", "such as", "including", "for example"]
+            .iter()
+            .any(|p| low.starts_with(p));
+        if !illustrative
+            && (grp.contains(',') || grp.contains('/') || grp.contains('|') || low.contains(" or "))
+        {
+            cand = Some(grp.to_string());
+            break;
+        }
+        rest = &rest[open + 1 + close_rel + 1..];
+    }
+    if cand.is_none() {
+        let low = defn.to_ascii_lowercase();
+        for cue in ["one of", "values", "value", "statuses", "status", "states", "state"] {
+            if let Some(i) = low.find(cue) {
+                let after = defn[i + cue.len()..].trim_start();
+                if let Some(after) = after.strip_prefix(':').or_else(|| after.strip_prefix('-')) {
+                    let taken: String = after
+                        .chars()
+                        .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | ',' | '/' | '|'))
+                        .collect();
+                    if taken.trim().len() > 1 {
+                        cand = Some(taken);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    let cand = cand?;
+    let mut vals: Vec<String> = Vec::new();
+    for piece in cand.replace(" or ", ",").split(|c| matches!(c, ',' | '/' | '|')) {
+        let p = piece.trim().trim_end_matches('.').trim().to_ascii_lowercase();
+        let ok = (2..=21).contains(&p.len())
+            && p.chars().next().is_some_and(|c| c.is_ascii_lowercase())
+            && p.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == ' ')
+            && !["a", "an", "of", "etc", "such", "value", "the"].contains(&p.as_str());
+        if ok && !vals.contains(&p) {
+            vals.push(p);
+        }
+    }
+    (vals.len() >= 2).then_some(vals)
+}
+
 fn quotable(s: &str) -> bool {
     !s.contains('"') && !s.contains('#')
 }
@@ -58,6 +118,7 @@ struct Ctx<'a> {
     seen_labels: BTreeSet<String>,
     seen_attrs: BTreeSet<(String, String)>,
     seen_cards: BTreeSet<(String, String)>,
+    seen_enums: BTreeSet<String>,
 }
 
 impl<'a> Ctx<'a> {
@@ -183,6 +244,7 @@ pub fn lower(doc: &Document) -> Lowering {
         seen_labels: BTreeSet::new(),
         seen_attrs: BTreeSet::new(),
         seen_cards: BTreeSet::new(),
+        seen_enums: BTreeSet::new(),
     };
 
     // top-level DisjointClasses blocks — n-ary lowers to all pairs (entailed)
@@ -202,6 +264,17 @@ pub fn lower(doc: &Document) -> Lowering {
         for (prop, text) in &frame.annotations {
             if is_label_prop(prop, doc) {
                 ctx.label(&subject, text);
+            } else if frame.kind == FrameKind::DataProperty && is_definition_prop(prop, doc) {
+                // a DataProperty definition enumerating a closed value set → @Enum
+                // (dormant on artifacts whose definitions live outside the omn — the
+                // deriver carrying skos:definition into the realized omn activates it)
+                if let Some(vals) = parse_enum_from_definition(text) {
+                    let vals: Vec<String> = vals.into_iter().filter(|v| quotable(v)).collect();
+                    if vals.len() >= 2 && ctx.seen_enums.insert(subject.clone()) {
+                        let quoted: Vec<String> = vals.iter().map(|v| format!("\"{v}\"")).collect();
+                        ctx.ann(format!("@Enum <{subject}> {}", quoted.join(" ")));
+                    }
+                }
             }
         }
         match frame.kind {
@@ -339,6 +412,31 @@ Individual: sdg:i_role_01
         assert!(lines.iter().any(|l| l.starts_with("ClassAssertion ")));
         assert!(lines.iter().any(|l| l.starts_with("DisjointClasses ")));
         assert_eq!(low.n_axioms + low.n_annotations, lines.len());
+    }
+
+    #[test]
+    fn enum_extraction_ports_the_python_rules() {
+        assert_eq!(
+            parse_enum_from_definition("Current state (pending / running / complete / failed)."),
+            Some(vec!["pending".into(), "running".into(), "complete".into(), "failed".into()])
+        );
+        assert_eq!(
+            parse_enum_from_definition("The status: open, closed, or archived"),
+            Some(vec!["open".into(), "closed".into(), "archived".into()])
+        );
+        // illustrative parentheticals never fire
+        assert_eq!(parse_enum_from_definition("A standard identifier (e.g. ISO, RFC)."), None);
+        assert_eq!(parse_enum_from_definition("A free-text note."), None);
+    }
+
+    #[test]
+    fn dataprop_definition_emits_enum_annotation() {
+        let (doc, _) = parse_document(
+            "Prefix: sdg: <https://x.org/sdg#>\nDataProperty: sdg:hasStatus\n    Annotations: skos:definition \"Lifecycle state (draft / final / retired)\"\n",
+        );
+        let low = lower(&doc);
+        assert!(low.kfs.contains("@Enum <https://x.org/sdg#hasStatus> \"draft\" \"final\" \"retired\""),
+            "{}", low.kfs);
     }
 
     #[test]
