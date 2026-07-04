@@ -20,7 +20,8 @@ Simančík–Kazakov–Horrocks; Horrocks et al. on absorption) — cited, not i
 | Process-isolated budgets | — | — (uninterruptible tableau) | **✓ deadline = kill** | ✓ |
 | Fragment gate (refuse, don't approximate) | — (accepts all, pays generality) | — | **✓ named refusals** | ✓ |
 | Zero-copy payload (FlatBuffers) | — | — | **✓ KFS/kfsb** | ✓ |
-| Range/domain + ∃-propagation refutation | (subsumed) | (subsumed) | — | **P0** |
+| Range/domain + ∃-propagation refutation | (subsumed) | (subsumed) | **✓ landed 2026-07-03** | ✓ (P0) |
+| Proof-carrying ontology→DDL lowering | — | — | annotation tier landed (`@`-forms routed, kernel-invisible); `kvasir-ddl` crate consumes certified saturations + annotations, cites input axioms per DDL element | **DDL** (rides aegir R1) |
 | Told classification + sat/unsat caching | `SatisfiableCache*`, `UnsatisfiableCache*`, `ComputedTypesCaching` | limited | — | **P1** |
 | Incremental reasoning (delta re-check) | `Revision.IncrementalRebuild` family, versioned KB | **none** | — | **P1** |
 | ⊥-locality module extraction | — (entity extraction only) | — (via OWLAPI) | — | **P1** |

@@ -18,7 +18,7 @@ pub mod verdict;
 #[path = "generated/kfs_generated.rs"]
 pub(crate) mod kfs_generated;
 
-pub use fragment::{parse_kfs, Axiom, OutOfFragment};
+pub use fragment::{parse_kfs, parse_kfs_tiered, Annotation, Axiom, Line, OutOfFragment};
 pub use saturate::saturate;
 pub use verdict::{Fact, Proof, Rule, Step, Verdict};
 

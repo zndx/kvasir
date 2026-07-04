@@ -38,6 +38,38 @@ pub enum Axiom {
     PropertyDomain { role: Name, domain: Name },
 }
 
+/// The ANNOTATION TIER — worldly structure DDL needs but the calculus refuses (cardinality
+/// bounds, attribute typing, enumerations, labels). A visible fragment WIDENING with two named
+/// consumers (kvasir-ddl, the differential harness), never a silent leak into reasoning:
+/// `@`-sigiled forms route here and are UNREPRESENTABLE in proofs by construction — `saturate`
+/// and `kvasir-check` take `Vec<Axiom>` only. The reasoning gate is unchanged: a bare
+/// cardinality construct stays refused by name; an unknown `@`-form is refused exactly like an
+/// unknown bare form. (Design: aegir kvasir-ddl map §3, 2026-07-04.)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Annotation {
+    /// `@Attribute <class> <prop> <xsd>` — a typed data attribute (a column candidate)
+    Attribute { class: Name, prop: Name, xsd: Name },
+    /// `@Cardinality <class> <prop> <min> <max|*>` — TRUE bounds; the reasoning lowering weakens
+    /// `exactly n` to `some`, the DDL source must not (`exactly 1` → `1 1`)
+    Cardinality {
+        class: Name,
+        prop: Name,
+        min: u32,
+        max: Option<u32>,
+    },
+    /// `@Enum <prop> "v" …` — a closed value set (lookup-table fuel)
+    Enum { prop: Name, values: Vec<String> },
+    /// `@Label <entity> "text"` — display text (semantic-register COMMENT payload only)
+    Label { entity: Name, text: String },
+}
+
+/// One parsed KFS line, tier-tagged. The reasoning view (`parse_kfs`) sees only `Axiom`s.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub enum Line {
+    Axiom(Axiom),
+    Annotation(Annotation),
+}
+
 /// A loud, named rejection. The gate never guesses.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct OutOfFragment {
@@ -112,13 +144,16 @@ const REFUSED: &[(&str, &str)] = &[
 /// IRIs (`<https://…#LocalName>`) are the actual payload of upstream fact streams, and a naive
 /// split-on-`#` truncates every one of them into an arity error (measured: the founding-artifact
 /// lowering, 8,099 axioms, 100% refused).
-pub fn parse_line(line_no: usize, raw: &str) -> Result<Option<Axiom>, OutOfFragment> {
+pub fn parse_line(line_no: usize, raw: &str) -> Result<Option<Line>, OutOfFragment> {
     let comment_at = raw.char_indices().find_map(|(i, c)| {
         (c == '#' && (i == 0 || raw[..i].ends_with(char::is_whitespace))).then_some(i)
     });
     let line = raw[..comment_at.unwrap_or(raw.len())].trim();
     if line.is_empty() {
         return Ok(None);
+    }
+    if let Some(rest) = line.strip_prefix('@') {
+        return parse_annotation(line_no, rest).map(|a| Some(Line::Annotation(a)));
     }
     let mut toks = line.split_whitespace();
     let head = toks.next().unwrap_or("");
@@ -137,10 +172,10 @@ pub fn parse_line(line_no: usize, raw: &str) -> Result<Option<Axiom>, OutOfFragm
     match head {
         "SubClassOf" => {
             arity(2, "SubClassOf <sub> <sup>")?;
-            Ok(Some(Axiom::SubClassOf {
+            Ok(Some(Line::Axiom(Axiom::SubClassOf {
                 sub: args[0].clone(),
                 sup: args[1].clone(),
-            }))
+            })))
         }
         "EquivalentToIntersection" => {
             if args.len() < 2 {
@@ -150,46 +185,46 @@ pub fn parse_line(line_no: usize, raw: &str) -> Result<Option<Axiom>, OutOfFragm
                     detail: "expects <class> then ≥1 conjunct".to_string(),
                 });
             }
-            Ok(Some(Axiom::EquivalentToIntersection {
+            Ok(Some(Line::Axiom(Axiom::EquivalentToIntersection {
                 class: args[0].clone(),
                 parts: args[1..].to_vec(),
-            }))
+            })))
         }
         "SubClassOfExistential" => {
             arity(3, "SubClassOfExistential <sub> <role> <filler>")?;
-            Ok(Some(Axiom::SubClassOfExistential {
+            Ok(Some(Line::Axiom(Axiom::SubClassOfExistential {
                 sub: args[0].clone(),
                 role: args[1].clone(),
                 filler: args[2].clone(),
-            }))
+            })))
         }
         "DisjointClasses" => {
             arity(2, "DisjointClasses <a> <b>")?;
-            Ok(Some(Axiom::DisjointClasses {
+            Ok(Some(Line::Axiom(Axiom::DisjointClasses {
                 a: args[0].clone(),
                 b: args[1].clone(),
-            }))
+            })))
         }
         "ClassAssertion" => {
             arity(2, "ClassAssertion <class> <individual>")?;
-            Ok(Some(Axiom::ClassAssertion {
+            Ok(Some(Line::Axiom(Axiom::ClassAssertion {
                 class: args[0].clone(),
                 individual: args[1].clone(),
-            }))
+            })))
         }
         "PropertyRange" => {
             arity(2, "PropertyRange <role> <class>")?;
-            Ok(Some(Axiom::PropertyRange {
+            Ok(Some(Line::Axiom(Axiom::PropertyRange {
                 role: args[0].clone(),
                 range: args[1].clone(),
-            }))
+            })))
         }
         "PropertyDomain" => {
             arity(2, "PropertyDomain <role> <class>")?;
-            Ok(Some(Axiom::PropertyDomain {
+            Ok(Some(Line::Axiom(Axiom::PropertyDomain {
                 role: args[0].clone(),
                 domain: args[1].clone(),
-            }))
+            })))
         }
         other => {
             let detail = REFUSED
@@ -206,15 +241,162 @@ pub fn parse_line(line_no: usize, raw: &str) -> Result<Option<Axiom>, OutOfFragm
     }
 }
 
-/// Parse a whole KFS document; the FIRST out-of-fragment line aborts the run (refuse-loud).
-pub fn parse_kfs(text: &str) -> Result<Vec<Axiom>, OutOfFragment> {
-    let mut out = Vec::new();
+/// Parse one `@`-sigiled annotation-tier line (the `@` already stripped). Strict per form;
+/// an unknown `@`-form or a malformed one is out-of-fragment — the tier widens the FORMAT,
+/// never the gate's posture.
+fn parse_annotation(line_no: usize, rest: &str) -> Result<Annotation, OutOfFragment> {
+    let (head, tail) = rest
+        .split_once(char::is_whitespace)
+        .unwrap_or((rest, ""));
+    let err = |detail: String| OutOfFragment {
+        line: line_no,
+        construct: format!("@{head}"),
+        detail,
+    };
+    match head {
+        "Attribute" => {
+            let args: Vec<String> = tail.split_whitespace().map(strip_angles).collect();
+            if args.len() != 3 {
+                return Err(err(format!(
+                    "@Attribute <class> <prop> <xsd> expects 3 arguments, got {}",
+                    args.len()
+                )));
+            }
+            Ok(Annotation::Attribute {
+                class: args[0].clone(),
+                prop: args[1].clone(),
+                xsd: args[2].clone(),
+            })
+        }
+        "Cardinality" => {
+            let args: Vec<String> = tail.split_whitespace().map(strip_angles).collect();
+            if args.len() != 4 {
+                return Err(err(format!(
+                    "@Cardinality <class> <prop> <min> <max|*> expects 4 arguments, got {}",
+                    args.len()
+                )));
+            }
+            let min: u32 = args[2]
+                .parse()
+                .map_err(|_| err(format!("min bound {:?} is not a u32", args[2])))?;
+            let max: Option<u32> = if args[3] == "*" {
+                None
+            } else {
+                Some(
+                    args[3]
+                        .parse()
+                        .map_err(|_| err(format!("max bound {:?} is not a u32 or '*'", args[3])))?,
+                )
+            };
+            if let Some(m) = max {
+                if min > m {
+                    return Err(err(format!("min {min} exceeds max {m}")));
+                }
+            }
+            Ok(Annotation::Cardinality {
+                class: args[0].clone(),
+                prop: args[1].clone(),
+                min,
+                max,
+            })
+        }
+        "Enum" => {
+            let (prop, vals_raw) = tail
+                .trim()
+                .split_once(char::is_whitespace)
+                .ok_or_else(|| err("@Enum <prop> \"v\" … expects a prop then ≥1 quoted value".into()))?;
+            let values = quoted_values(line_no, head, vals_raw)?;
+            if values.is_empty() {
+                return Err(err("@Enum expects ≥1 quoted value".into()));
+            }
+            Ok(Annotation::Enum {
+                prop: strip_angles(prop),
+                values,
+            })
+        }
+        "Label" => {
+            let (entity, text_raw) = tail
+                .trim()
+                .split_once(char::is_whitespace)
+                .ok_or_else(|| err("@Label <entity> \"text\" expects an entity then one quoted string".into()))?;
+            let mut vals = quoted_values(line_no, head, text_raw)?;
+            if vals.len() != 1 {
+                return Err(err(format!(
+                    "@Label expects exactly one quoted string, got {}",
+                    vals.len()
+                )));
+            }
+            Ok(Annotation::Label {
+                entity: strip_angles(entity),
+                text: vals.remove(0),
+            })
+        }
+        other => Err(OutOfFragment {
+            line: line_no,
+            construct: format!("@{other}"),
+            detail: "unknown annotation form — the tier admits only @Attribute/@Cardinality/@Enum/@Label"
+                .to_string(),
+        }),
+    }
+}
+
+/// Strict quoted-value scanner: a whitespace-separated sequence of `"…"` strings, no escapes
+/// (values are vocabulary tokens; the emitter refuses embedded quotes upstream). Anything
+/// unquoted or unterminated is out-of-fragment.
+fn quoted_values(line_no: usize, head: &str, raw: &str) -> Result<Vec<String>, OutOfFragment> {
+    let mut vals = Vec::new();
+    let mut chars = raw.trim().chars();
+    while let Some(c) = chars.next() {
+        if c.is_whitespace() {
+            continue;
+        }
+        if c != '"' {
+            return Err(OutOfFragment {
+                line: line_no,
+                construct: format!("@{head}"),
+                detail: format!("values must be double-quoted; found {c:?}"),
+            });
+        }
+        let mut s = String::new();
+        loop {
+            match chars.next() {
+                Some('"') => break,
+                Some(ch) => s.push(ch),
+                None => {
+                    return Err(OutOfFragment {
+                        line: line_no,
+                        construct: format!("@{head}"),
+                        detail: "unterminated quoted value".to_string(),
+                    })
+                }
+            }
+        }
+        vals.push(s);
+    }
+    Ok(vals)
+}
+
+/// Parse a whole KFS document into BOTH tiers; the FIRST out-of-fragment line aborts the run
+/// (refuse-loud). The reasoning engine and the kernel consume only the axioms; kvasir-ddl and
+/// the differential harness consume both.
+pub fn parse_kfs_tiered(text: &str) -> Result<(Vec<Axiom>, Vec<Annotation>), OutOfFragment> {
+    let mut axioms = Vec::new();
+    let mut annotations = Vec::new();
     for (i, raw) in text.lines().enumerate() {
-        if let Some(ax) = parse_line(i + 1, raw)? {
-            out.push(ax);
+        match parse_line(i + 1, raw)? {
+            Some(Line::Axiom(ax)) => axioms.push(ax),
+            Some(Line::Annotation(an)) => annotations.push(an),
+            None => {}
         }
     }
-    Ok(out)
+    Ok((axioms, annotations))
+}
+
+/// The REASONING view of a document: annotation-tier lines route past it (they are
+/// unrepresentable in `Vec<Axiom>` and therefore in any proof), unknown constructs still
+/// refuse loudly. Callers needing the annotations use [`parse_kfs_tiered`].
+pub fn parse_kfs(text: &str) -> Result<Vec<Axiom>, OutOfFragment> {
+    parse_kfs_tiered(text).map(|(axioms, _)| axioms)
 }
 
 fn strip_angles(t: &str) -> String {
@@ -273,5 +455,59 @@ DisjointClasses <https://signals.zndx.org/sdg#B> <https://signals.zndx.org/sdg#C
     fn arity_errors_are_out_of_fragment() {
         assert!(parse_kfs("SubClassOf <a>").is_err());
         assert!(parse_kfs("DisjointClasses <a> <b> <c>").is_err());
+    }
+
+    #[test]
+    fn annotation_tier_routes_not_admits() {
+        let doc = "\
+SubClassOf <a> <b>
+@Attribute <a> <sdg:hasEncoding> <xsd:string>
+@Cardinality <a> <sdg:inheresIn> 1 1
+@Enum <sdg:hasStatus> \"pending\" \"in progress\" \"complete\"
+@Label <a> \"ablation process\"
+DisjointClasses <a> <c>
+";
+        let (axioms, annotations) = parse_kfs_tiered(doc).expect("tiered doc must parse");
+        assert_eq!(axioms.len(), 2);
+        assert_eq!(annotations.len(), 4);
+        // the reasoning view sees ONLY the axioms — annotations are unrepresentable in proofs
+        assert_eq!(parse_kfs(doc).unwrap().len(), 2);
+        assert!(matches!(
+            &annotations[1],
+            Annotation::Cardinality { min: 1, max: Some(1), .. }
+        ));
+        assert!(
+            matches!(&annotations[2], Annotation::Enum { values, .. } if values[1] == "in progress")
+        );
+    }
+
+    #[test]
+    fn unknown_annotation_forms_refuse_loudly() {
+        let err = parse_kfs("@Widget <a> <b>").expect_err("must refuse");
+        assert_eq!(err.construct, "@Widget");
+        assert!(!err.detail.is_empty());
+    }
+
+    #[test]
+    fn bare_cardinality_stays_refused_the_tier_does_not_soften_the_gate() {
+        assert!(parse_kfs("ObjectExactCardinality <a> <b>").is_err());
+    }
+
+    #[test]
+    fn malformed_annotations_refuse() {
+        assert!(parse_kfs("@Cardinality <a> <p> 2 1").is_err()); // min > max
+        assert!(parse_kfs("@Cardinality <a> <p> 1 x").is_err()); // non-numeric max
+        assert!(parse_kfs("@Enum <p> pending").is_err()); // unquoted value
+        assert!(parse_kfs("@Label <a> \"unterminated").is_err());
+        assert!(parse_kfs("@Attribute <a> <p>").is_err()); // arity
+    }
+
+    #[test]
+    fn cardinality_star_is_unbounded() {
+        let (_, anns) = parse_kfs_tiered("@Cardinality <a> <p> 2 *").unwrap();
+        assert!(matches!(
+            &anns[0],
+            Annotation::Cardinality { min: 2, max: None, .. }
+        ));
     }
 }
