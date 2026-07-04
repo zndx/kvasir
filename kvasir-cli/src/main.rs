@@ -14,11 +14,12 @@
 //! uninterruptible in-process tableau. `.kfsb` is the payload-layer FlatBuffers front-end (Kudu-style:
 //! bulk data zero-copy; envelope protocols unchanged) — dispatched by extension.
 
+mod ddl;
 mod manchester;
 
 use std::process::ExitCode;
 
-use kvasir_core::{check, check_kfsb, kfsb, parse_kfs, Verdict};
+use kvasir_core::{check, check_kfsb, kfsb, parse_kfs, parse_kfs_tiered, saturate, Verdict};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
@@ -26,13 +27,93 @@ fn main() -> ExitCode {
         Some("check") => cmd_check(&args),
         Some("convert") => cmd_convert(&args),
         Some("lower") => cmd_lower(&args),
+        Some("ddl") => cmd_ddl(&args),
         _ => {
             eprintln!("usage: kvasir check <file.kfs|file.kfsb> [--json]");
             eprintln!("       kvasir convert <in.kfs> <out.kfsb>");
             eprintln!("       kvasir lower <file.omn> [--json]");
+            eprintln!("       kvasir ddl <file.omn|file.kfs> [--sql]");
             ExitCode::from(3)
         }
     }
+}
+
+/// Manchester or tiered KFS → proof-carrying semantic DDL plan (JSON; `--sql` renders
+/// statements). Gate first: an inconsistent ontology REFUSES emission (exit 1) with the
+/// refutation named — no schema from falsehood. Rendered SQL must pass the sqlparser
+/// self-check before leaving the process (exit 3 otherwise).
+fn cmd_ddl(args: &[String]) -> ExitCode {
+    let sql_out = args.iter().any(|a| a == "--sql");
+    let Some(path) = args.get(2).filter(|a| !a.starts_with("--")).cloned() else {
+        eprintln!("usage: kvasir ddl <file.omn|file.kfs> [--sql]");
+        return ExitCode::from(3);
+    };
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("kvasir: cannot read {path}: {e}");
+            return ExitCode::from(3);
+        }
+    };
+    // (kfs, per-emitted-line source citations): .omn lowers internally and cites the
+    // user's omn lines; a .kfs file cites its own line numbers.
+    let (kfs, src) = if path.ends_with(".omn") || path.ends_with(".owl") {
+        let (doc, issues) = manchester::parse_document(&text);
+        for issue in &issues {
+            eprintln!("kvasir ddl: {issue}");
+        }
+        let low = manchester::lower(&doc);
+        (low.kfs, low.src_lines)
+    } else {
+        let mut src: Vec<usize> = Vec::new();
+        let mut ann: Vec<usize> = Vec::new();
+        for (i, raw) in text.lines().enumerate() {
+            let comment_at = raw.char_indices().find_map(|(k, c)| {
+                (c == '#' && (k == 0 || raw[..k].ends_with(char::is_whitespace))).then_some(k)
+            });
+            let line = raw[..comment_at.unwrap_or(raw.len())].trim();
+            if line.is_empty() {
+                continue;
+            }
+            if line.starts_with('@') {
+                ann.push(i + 1);
+            } else {
+                src.push(i + 1);
+            }
+        }
+        src.extend(ann);
+        (text.clone(), src)
+    };
+    let (axioms, annotations) = match parse_kfs_tiered(&kfs) {
+        Ok(t) => t,
+        Err(oof) => {
+            eprintln!("kvasir: {oof}");
+            return ExitCode::from(2);
+        }
+    };
+    if let Verdict::Refuted { unsat_classes, .. } = saturate(&axioms) {
+        eprintln!(
+            "kvasir ddl: REFUSED — ontology is inconsistent (unsat: {unsat_classes:?}); \
+             no schema is emitted from a falsified source"
+        );
+        return ExitCode::from(1);
+    }
+    let (ax_cite, ann_cite) = src.split_at(axioms.len().min(src.len()));
+    let mut plan = ddl::plan(&axioms, &annotations, ax_cite, ann_cite);
+    let (stmts, ok) = ddl::render_and_check(&plan);
+    plan.sql_valid = ok;
+    if !ok {
+        eprintln!("kvasir ddl: INTERNAL — rendered SQL failed the sqlparser self-check");
+        return ExitCode::from(3);
+    }
+    if sql_out {
+        for s in &stmts {
+            println!("{s};\n");
+        }
+    } else {
+        println!("{}", serde_json::to_string_pretty(&plan).unwrap());
+    }
+    ExitCode::SUCCESS
 }
 
 /// Manchester → tiered KFS. Parse issues go to stderr (loud containment, exit stays 0

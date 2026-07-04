@@ -15,3 +15,5 @@ path = "src/main.rs"
 kvasir-core = { path = "../kvasir-core" }
 kvasir-check = { path = "../kvasir-check" }
 serde_json = { workspace = true }
+sqlparser = "0.62.0"
+serde = { workspace = true, features = ["derive"] }

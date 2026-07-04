@@ -24,11 +24,16 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::{Document, Expr, FrameKind};
 
 /// The lowering result: tiered KFS text + accounting.
+///
+/// `src_lines[i]` is the SOURCE (omn) line that produced the i-th emitted KFS line
+/// (axioms first, then annotations) — the citation provenance kvasir-ddl consumes so
+/// DDL elements cite the USER's document, not an intermediate.
 #[derive(Debug)]
 pub struct Lowering {
     pub kfs: String,
     pub n_axioms: usize,
     pub n_annotations: usize,
+    pub src_lines: Vec<usize>,
     pub skipped: BTreeMap<String, usize>,
 }
 
@@ -46,6 +51,9 @@ struct Ctx<'a> {
     doc: &'a Document,
     axioms: Vec<String>,
     annotations: Vec<String>,
+    ax_lines: Vec<usize>,
+    ann_lines: Vec<usize>,
+    cur_line: usize,
     skipped: BTreeMap<String, usize>,
     seen_labels: BTreeSet<String>,
     seen_attrs: BTreeSet<(String, String)>,
@@ -53,6 +61,16 @@ struct Ctx<'a> {
 }
 
 impl<'a> Ctx<'a> {
+    fn ax(&mut self, line: String) {
+        self.axioms.push(line);
+        self.ax_lines.push(self.cur_line);
+    }
+
+    fn ann(&mut self, line: String) {
+        self.annotations.push(line);
+        self.ann_lines.push(self.cur_line);
+    }
+
     fn skip(&mut self, key: &str) {
         *self.skipped.entry(key.to_string()).or_insert(0) += 1;
     }
@@ -66,7 +84,7 @@ impl<'a> Ctx<'a> {
         match conj {
             Expr::Named(n) => {
                 let n = self.x(n);
-                self.axioms.push(format!("SubClassOf <{subject}> <{n}>"));
+                self.ax(format!("SubClassOf <{subject}> <{n}>"));
             }
             Expr::Some { property, filler } => self.lower_existential(subject, property, filler, None),
             Expr::Exactly { property, n, filler } => {
@@ -120,13 +138,11 @@ impl<'a> Ctx<'a> {
             Expr::Named(f) => {
                 let p = self.x(property);
                 let f_x = self.x(f);
-                self.axioms
-                    .push(format!("SubClassOfExistential <{subject}> <{p}> <{f_x}>"));
+                self.ax(format!("SubClassOfExistential <{subject}> <{p}> <{f_x}>"));
                 if f.starts_with("xsd:") || f_x.starts_with(XSD_NS) {
                     let key = (subject.to_string(), p.clone());
                     if self.seen_attrs.insert(key) {
-                        self.annotations
-                            .push(format!("@Attribute <{subject}> <{p}> <{f_x}>"));
+                        self.ann(format!("@Attribute <{subject}> <{p}> <{f_x}>"));
                     }
                 }
             }
@@ -139,8 +155,7 @@ impl<'a> Ctx<'a> {
         let key = (subject.to_string(), p.clone());
         if self.seen_cards.insert(key) {
             let mx = max.map_or("*".to_string(), |m| m.to_string());
-            self.annotations
-                .push(format!("@Cardinality <{subject}> <{p}> {min} {mx}"));
+            self.ann(format!("@Cardinality <{subject}> <{p}> {min} {mx}"));
         }
     }
 
@@ -150,7 +165,7 @@ impl<'a> Ctx<'a> {
             return;
         }
         if self.seen_labels.insert(subject.to_string()) {
-            self.annotations.push(format!("@Label <{subject}> \"{text}\""));
+            self.ann(format!("@Label <{subject}> \"{text}\""));
         }
     }
 }
@@ -161,6 +176,9 @@ pub fn lower(doc: &Document) -> Lowering {
         doc,
         axioms: Vec::new(),
         annotations: Vec::new(),
+        ax_lines: Vec::new(),
+        ann_lines: Vec::new(),
+        cur_line: 0,
         skipped: BTreeMap::new(),
         seen_labels: BTreeSet::new(),
         seen_attrs: BTreeSet::new(),
@@ -169,16 +187,18 @@ pub fn lower(doc: &Document) -> Lowering {
 
     // top-level DisjointClasses blocks — n-ary lowers to all pairs (entailed)
     for block in &doc.disjoint_blocks {
+        ctx.cur_line = block.line;
         let atoms: Vec<String> = block.atoms.iter().map(|a| ctx.x(a)).collect();
         for (i, a) in atoms.iter().enumerate() {
             for b in &atoms[i + 1..] {
-                ctx.axioms.push(format!("DisjointClasses <{a}> <{b}>"));
+                ctx.ax(format!("DisjointClasses <{a}> <{b}>"));
             }
         }
     }
 
     for frame in &doc.frames {
         let subject = ctx.x(&frame.subject);
+        ctx.cur_line = frame.line;
         for (prop, text) in &frame.annotations {
             if is_label_prop(prop, doc) {
                 ctx.label(&subject, text);
@@ -187,6 +207,7 @@ pub fn lower(doc: &Document) -> Lowering {
         match frame.kind {
             FrameKind::Class => {
                 for section in &frame.sections {
+                    ctx.cur_line = section.line;
                     match section.keyword.as_str() {
                         "SubClassOf" | "EquivalentTo" => {
                             for item in &section.items {
@@ -199,8 +220,7 @@ pub fn lower(doc: &Document) -> Lowering {
                             for item in &section.items {
                                 if let Expr::Named(n) = item {
                                     let n = ctx.x(n);
-                                    ctx.axioms
-                                        .push(format!("DisjointClasses <{subject}> <{n}>"));
+                                    ctx.ax(format!("DisjointClasses <{subject}> <{n}>"));
                                 } else {
                                     ctx.skip("disjoint:non-atomic");
                                 }
@@ -213,6 +233,7 @@ pub fn lower(doc: &Document) -> Lowering {
             }
             FrameKind::ObjectProperty => {
                 for section in &frame.sections {
+                    ctx.cur_line = section.line;
                     match section.keyword.as_str() {
                         kw @ ("Domain" | "Range") => {
                             for item in &section.items {
@@ -223,7 +244,7 @@ pub fn lower(doc: &Document) -> Lowering {
                                     } else {
                                         "PropertyRange"
                                     };
-                                    ctx.axioms.push(format!("{form} <{subject}> <{n}>"));
+                                    ctx.ax(format!("{form} <{subject}> <{n}>"));
                                 } else {
                                     ctx.skip(&format!("{}:non-atomic", kw.to_lowercase()));
                                 }
@@ -236,13 +257,13 @@ pub fn lower(doc: &Document) -> Lowering {
             }
             FrameKind::Individual => {
                 for section in &frame.sections {
+                    ctx.cur_line = section.line;
                     match section.keyword.as_str() {
                         "Types" => {
                             for item in &section.items {
                                 if let Expr::Named(n) = item {
                                     let n = ctx.x(n);
-                                    ctx.axioms
-                                        .push(format!("ClassAssertion <{n}> <{subject}>"));
+                                    ctx.ax(format!("ClassAssertion <{n}> <{subject}>"));
                                 } else {
                                     ctx.skip("types:non-atomic");
                                 }
@@ -267,10 +288,13 @@ pub fn lower(doc: &Document) -> Lowering {
         kfs.push_str(&ctx.annotations.join("\n"));
     }
     kfs.push('\n');
+    let mut src_lines = ctx.ax_lines;
+    src_lines.extend_from_slice(&ctx.ann_lines);
     Lowering {
         kfs,
         n_axioms,
         n_annotations,
+        src_lines,
         skipped: ctx.skipped,
     }
 }
