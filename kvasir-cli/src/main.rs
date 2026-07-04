@@ -1,6 +1,8 @@
 //! kvasir CLI —
 //!   `kvasir check <file.kfs|file.kfsb> [--json]`   gate + saturate + self-checked verdict
 //!   `kvasir convert <in.kfs> <out.kfsb>`           text → FlatBuffers payload (KFS binary)
+//!   `kvasir lower <file.omn> [--json]`             Manchester → tiered KFS on stdout
+//!                                                  (--json: stats to stdout instead)
 //!
 //! Exit codes (stable interface for the upstream membrane):
 //!   0  no clash found (NOT a certificate — see README doctrine rule 2)
@@ -12,6 +14,8 @@
 //! uninterruptible in-process tableau. `.kfsb` is the payload-layer FlatBuffers front-end (Kudu-style:
 //! bulk data zero-copy; envelope protocols unchanged) — dispatched by extension.
 
+mod manchester;
+
 use std::process::ExitCode;
 
 use kvasir_core::{check, check_kfsb, kfsb, parse_kfs, Verdict};
@@ -21,12 +25,51 @@ fn main() -> ExitCode {
     match args.get(1).map(String::as_str) {
         Some("check") => cmd_check(&args),
         Some("convert") => cmd_convert(&args),
+        Some("lower") => cmd_lower(&args),
         _ => {
             eprintln!("usage: kvasir check <file.kfs|file.kfsb> [--json]");
             eprintln!("       kvasir convert <in.kfs> <out.kfsb>");
+            eprintln!("       kvasir lower <file.omn> [--json]");
             ExitCode::from(3)
         }
     }
+}
+
+/// Manchester → tiered KFS. Parse issues go to stderr (loud containment, exit stays 0
+/// so the differential can proceed); IO errors exit 3. `--json` prints stats instead
+/// of the KFS text.
+fn cmd_lower(args: &[String]) -> ExitCode {
+    let json = args.iter().any(|a| a == "--json");
+    let Some(path) = args.get(2).filter(|a| *a != "--json").cloned() else {
+        eprintln!("usage: kvasir lower <file.omn> [--json]");
+        return ExitCode::from(3);
+    };
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("kvasir: cannot read {path}: {e}");
+            return ExitCode::from(3);
+        }
+    };
+    let (doc, issues) = manchester::parse_document(&text);
+    for issue in &issues {
+        eprintln!("kvasir lower: {issue}");
+    }
+    let low = manchester::lower(&doc);
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "n_axioms": low.n_axioms,
+                "n_annotations": low.n_annotations,
+                "n_issues": issues.len(),
+                "skipped": low.skipped,
+            })
+        );
+    } else {
+        print!("{}", low.kfs);
+    }
+    ExitCode::SUCCESS
 }
 
 fn cmd_check(args: &[String]) -> ExitCode {

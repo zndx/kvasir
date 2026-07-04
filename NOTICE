@@ -1,0 +1,8 @@
+kvasir
+Copyright zndx
+
+This product includes software developed at zndx (Apache License 2.0).
+
+The Manchester-syntax expression lexer and recursive-descent parser in
+kvasir-cli/src/manchester/{lexer,expr}.rs are adapted from the OxiRS project
+(oxirs-rule/src/manchester/), licensed under the Apache License 2.0.
