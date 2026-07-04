@@ -178,7 +178,10 @@ pub fn plan(
 ) -> Plan {
     // ── indexes (everything keyed by full IRI, carrying its citation) ──────────
     let mut sub: BTreeMap<&str, Vec<(&str, usize)>> = BTreeMap::new();
-    let mut exts: BTreeMap<&str, Vec<(&str, &str, usize)>> = BTreeMap::new();
+    // (prop, target, cite, is_existential) — an existential relation is NOT NULL (min≥1);
+    // an @Relation (max/only) is optional. When a property has BOTH, dedup keeps the
+    // existential (it is pushed first, from the axiom loop) so the NOT NULL wins.
+    let mut exts: BTreeMap<&str, Vec<(&str, &str, usize, bool)>> = BTreeMap::new();
     let mut ranges: BTreeMap<&str, (&str, usize)> = BTreeMap::new();
     let mut domains: BTreeMap<&str, (&str, usize)> = BTreeMap::new();
     for (i, ax) in axioms.iter().enumerate() {
@@ -192,7 +195,7 @@ pub fn plan(
             }
             Axiom::SubClassOfExistential { sub: s, role, filler } => {
                 if !filler.starts_with(XSD_NS) && !filler.starts_with("xsd:") {
-                    exts.entry(s).or_default().push((role, filler, c));
+                    exts.entry(s).or_default().push((role, filler, c, true));
                 }
             }
             Axiom::PropertyRange { role, range } => {
@@ -224,13 +227,12 @@ pub fn plan(
                 labels.entry(entity).or_insert((text, c));
             }
             Annotation::Relation { class, prop, target } => {
-                // a schema-real, non-existential relation (max/only) — a nullable FK.
-                // Merge into the same ext index the existentials feed; the per-property
-                // dedup in rollup keeps an existential (NOT NULL) winning over a bare
-                // @Relation when both name the property, and @Cardinality (max 1) makes
-                // the column nullable regardless (min defaults to 0 for @Relation-only).
-                exts.entry(class).or_default().push((prop, target, c));
-                cards.entry((class, prop)).or_insert((0, None, c));
+                // a schema-real, non-existential relation (max/only) — an OPTIONAL FK.
+                // Pushed after the existentials so rollup's per-property dedup keeps an
+                // existential (NOT NULL) when both name the property. Nullability is
+                // driven by is_existential (below), NOT by a cardinality entry — a
+                // co-present `some` must not be nullified by an `only`.
+                exts.entry(class).or_default().push((prop, target, c, false));
             }
         }
     }
@@ -267,8 +269,8 @@ pub fn plan(
         // @Cardinality annotation is keyed there, so a subclass's inherited relation
         // must resolve its bound at the holder, not at the subclass; else min-2 etc.
         // silently downgrades to a single FK on every subclass — the projection leak
-        // the falsification test caught).
-        exts: Vec<(&'a str, &'a str, Vec<usize>, &'a str)>,
+        // the falsification test caught), is_existential (NOT NULL vs optional FK).
+        exts: Vec<(&'a str, &'a str, Vec<usize>, &'a str, bool)>,
     }
     let mut rolled: BTreeMap<&str, Rolled> = BTreeMap::new();
     for class in &all_classes {
@@ -279,9 +281,9 @@ pub fn plan(
                 r.attrs.push((p, x, vec![*c]));
             }
         }
-        for (p, t, c) in exts.get(class).map(|v| v.as_slice()).unwrap_or(&[]) {
+        for (p, t, c, is_ex) in exts.get(class).map(|v| v.as_slice()).unwrap_or(&[]) {
             if seen_prop.insert(p) {
-                r.exts.push((p, t, vec![*c], class));
+                r.exts.push((p, t, vec![*c], class, *is_ex));
             }
         }
         for (anc, path) in ancestors(class) {
@@ -296,14 +298,19 @@ pub fn plan(
                     r.attrs.push((p, x, cites));
                 }
             }
-            for (p, t, c) in exts.get(key).map(|v| v.as_slice()).unwrap_or(&[]) {
+            for (p, t, c, is_ex) in exts.get(key).map(|v| v.as_slice()).unwrap_or(&[]) {
                 if seen_prop.insert(p) {
                     let mut cites = vec![*c];
                     cites.extend(&path);
-                    r.exts.push((p, t, cites, key));
+                    r.exts.push((p, t, cites, key, *is_ex));
                 }
             }
         }
+        // canonical column order: sort by property IRI so the emitted schema is
+        // SOURCE-INDEPENDENT (an omn and its own emitted shapes yield byte-identical
+        // DDL — the fixpoint invariant; and any two runs agree regardless of rollup path).
+        r.attrs.sort_by(|a, b| a.0.cmp(b.0));
+        r.exts.sort_by(|a, b| a.0.cmp(b.0));
         rolled.insert(class, r);
     }
 
@@ -316,7 +323,7 @@ pub fn plan(
     // FK targets need a table to point at; un-elected targets become bare reference tables
     let mut reference: BTreeSet<&str> = BTreeSet::new();
     for class in &elected {
-        for (_, t, _, _) in &rolled[class].exts {
+        for (_, t, _, _, _) in &rolled[class].exts {
             if !elected.contains(t) {
                 reference.insert(t);
             }
@@ -420,7 +427,7 @@ pub fn plan(
             }
         }
 
-        for (p, t, cites, holder) in &r.exts {
+        for (p, t, cites, holder, is_ex) in &r.exts {
             let mut cites = cites.clone();
             if let Some((rng, rc)) = ranges.get(*p) {
                 cites.push(*rc);
@@ -445,13 +452,22 @@ pub fn plan(
             if bc != 0 {
                 cites.push(bc);
             }
-            let single = max == Some(1) || (min <= 1 && max.is_none() && bc == 0);
+            // nullability is the EXISTENTIAL question, not the cardinality one: a `some`
+            // is NOT NULL even if an `only`/`max` co-names the property (the fixpoint
+            // caught this). A pure @Relation's effective min is 0 for display/nullable.
+            let eff_min = if *is_ex { min.max(1) } else { 0 };
+            // junction iff GENUINE multiplicity — min>1 or max>1. `some`/`min 1`/`exactly 1`
+            // are all minCount 1 in a shapes graph (∃ IS min 1), so they must realize
+            // identically (single FK) or the round-trip cannot recover the distinction —
+            // the fixpoint forces the principled rule.
+            let many = min > 1 || max.is_some_and(|m| m > 1);
+            let single = !many;
             if single {
                 let col = uniq(&mut used_cols, prop_col(p));
                 columns.push(Column {
                     name: col.clone(),
                     sql_type: "VARCHAR(255)".into(),
-                    nullable: min == 0,
+                    nullable: !is_ex,
                     pk: false,
                     prop: Some((*p).to_string()),
                     comment: Some(format!(
@@ -459,7 +475,7 @@ pub fn plan(
                         display(&labels, t),
                         display(&labels, class),
                         crate::verbalise::words(local(p)),
-                        bound_phrase(min, max),
+                        bound_phrase(eff_min, max),
                     )),
                     cites: cites.clone(),
                 });
@@ -588,7 +604,7 @@ SubClassOf <s#NurseRole> <s#Role>
 PropertyDomain <s#inheresIn> <s#Role>
 @Attribute <s#Role> <s#hasStatus> <http://www.w3.org/2001/XMLSchema#string>
 @Cardinality <s#Role> <s#inheresIn> 1 1
-@Cardinality <s#Role> <s#realizes> 1 *
+@Cardinality <s#Role> <s#realizes> 2 *
 @Enum <s#hasStatus> \"active\" \"retired\"
 @Label <s#Role> \"role\"
 ";

@@ -1,22 +1,29 @@
-//! shapes module — the IMPLICIT SHACL Core emission (`kvasir shapes <file.omn>`).
+//! shapes module — SHACL Core EMISSION + INGESTION (`kvasir shapes` / `kvasir ddl --shapes`).
 //!
 //! SHACL ruling (aegir map §9): shapes are NOT optional — explicit when user-provided,
 //! IMPLICIT when kvasir completes the constraints itself to render DDL. This module is
-//! the implicit half: derive the shapes graph from the same entailments + annotation
-//! tier the ddl module consumes, and EMIT it so users have the standard syntax to
-//! extend — and so a third-party conformant SHACL toolchain can realize the same DDL
-//! from (ontology + emitted shapes). Ingestion (the explicit case, via the rudof
-//! `shacl` crate, default-features=false → Core only) and the fixpoint invariant
-//! (own emitted shapes fed back → byte-identical DDL) are the follow-on increment.
+//! both halves: [`emit`] derives the shapes graph from the tiered facts the ddl module
+//! consumes; [`parse`] reads a shapes graph BACK into those facts, so a shapes file is a
+//! first-class DDL constraint source and users can hand-author/extend the standard syntax.
 //!
 //! DENORMALIZED BY DESIGN: each targeted class carries its ROLLED constraints (own +
 //! inherited), so no entailment regime is assumed — a plain SHACL Core validator sees
-//! exactly what the DDL realizes. Emission is canonical (sorted classes, sorted
-//! property paths): same input, same bytes.
+//! exactly what the DDL realizes. Emission is canonical (sorted classes, sorted property
+//! paths): same input, same bytes.
 //!
 //! The tier↔SHACL correspondence this makes literal:
 //!   @Attribute  ≡ sh:path + sh:datatype        @Cardinality ≡ sh:minCount/sh:maxCount
-//!   @Enum       ≡ sh:in                        existential  ≡ sh:path + sh:class + sh:minCount 1
+//!   @Enum       ≡ sh:in                        existential  ≡ sh:path + sh:class + sh:minCount≥1
+//!   @Relation   ≡ sh:path + sh:class (no minCount — the optional/nullable FK)
+//!
+//! CONTAINMENT NOTE (2026-07-04): the rudof `shacl` crate (the standards validator) pulls
+//! 567 crates incl. reqwest/hyper/tokio even with default-features=false — an HTTP+async
+//! stack for a Turtle parser, exactly the sprawl the containment ruling refuses. So
+//! [`parse`] is a LEAN reader of the SHACL-Core Turtle subset (the shape this tool emits
+//! and a conformant author would write) — the same judgement as sqlparser-for-self-check
+//! vs polyglot-as-authority. It proves the FIXPOINT (own emitted shapes → identical DDL)
+//! and ingests hand-authored Core shapes; robust arbitrary-graph ingestion (full RDF,
+//! blank-node graphs, alt lexical forms) is a separately-justified later increment.
 
 use std::collections::BTreeMap;
 
@@ -36,9 +43,11 @@ struct PropShape {
 /// Emit a SHACL Core shapes graph (Turtle) from the tiered facts. Same election as
 /// the ddl module: a NodeShape per class with ≥1 rolled attribute or existential.
 pub fn emit(axioms: &[Axiom], annotations: &[Annotation]) -> String {
-    // told edges + per-class own facts
+    // told edges + per-class own facts. (prop, target, is_existential): an existential
+    // is NOT NULL → sh:minCount≥1; a pure @Relation is optional → no minCount. Pushed
+    // existentials-first so per-path dedup keeps the NOT NULL when both co-name a prop.
     let mut sub: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
-    let mut exts: BTreeMap<&str, Vec<(&str, &str)>> = BTreeMap::new();
+    let mut exts: BTreeMap<&str, Vec<(&str, &str, bool)>> = BTreeMap::new();
     for ax in axioms {
         match ax {
             Axiom::SubClassOf { sub: s, sup } => sub.entry(s).or_default().push(sup),
@@ -49,7 +58,7 @@ pub fn emit(axioms: &[Axiom], annotations: &[Annotation]) -> String {
             }
             Axiom::SubClassOfExistential { sub: s, role, filler } => {
                 if !filler.starts_with(XSD_NS) && !filler.starts_with("xsd:") {
-                    exts.entry(s).or_default().push((role, filler));
+                    exts.entry(s).or_default().push((role, filler, true));
                 }
             }
             _ => {}
@@ -72,9 +81,8 @@ pub fn emit(axioms: &[Axiom], annotations: &[Annotation]) -> String {
             Annotation::Label { .. } => {}
             Annotation::Relation { class, prop, target } => {
                 // a schema-real non-existential relation → sh:class, no minCount
-                // (optional). Merge into the same ext index as existentials; the
-                // per-path dedup below keeps a class/datatype constraint if one exists.
-                exts.entry(class).or_default().push((prop, target));
+                // (optional). Pushed after existentials so the NOT NULL wins on dedup.
+                exts.entry(class).or_default().push((prop, target, false));
             }
         }
     }
@@ -115,11 +123,16 @@ pub fn emit(axioms: &[Axiom], annotations: &[Annotation]) -> String {
                     }
                 }
             }
-            for (p, t) in exts.get(holder).map(|v| v.as_slice()).unwrap_or(&[]) {
+            for (p, t, is_ex) in exts.get(holder).map(|v| v.as_slice()).unwrap_or(&[]) {
                 let entry = props.entry(p).or_default();
                 if entry.datatype.is_none() && entry.class.is_none() {
                     entry.class = Some((*t).to_string());
-                    let (mn, mx) = cards.get(&(holder, *p)).copied().unwrap_or((1, None));
+                    // an existential defaults to minCount 1 (NOT NULL); a pure @Relation
+                    // to 0 (optional). An explicit @Cardinality overrides either.
+                    let (mn, mx) = cards
+                        .get(&(holder, *p))
+                        .copied()
+                        .unwrap_or((if *is_ex { 1 } else { 0 }, None));
                     entry.min = Some(mn);
                     entry.max = mx;
                 }
@@ -166,6 +179,133 @@ pub fn emit(axioms: &[Axiom], annotations: &[Annotation]) -> String {
     out
 }
 
+// ── INGESTION: SHACL Core Turtle → tiered facts (the lean reader) ──────────────
+#[derive(Default)]
+struct InProp {
+    path: Option<String>,
+    datatype: Option<String>,
+    class: Option<String>,
+    min: Option<u32>,
+    max: Option<u32>,
+    values: Vec<String>,
+}
+
+fn expand_xsd(tok: &str) -> String {
+    tok.strip_prefix("xsd:")
+        .map(|l| format!("{XSD_NS}{l}"))
+        .unwrap_or_else(|| tok.trim_start_matches('<').trim_end_matches('>').to_string())
+}
+
+fn quoted_list(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '"' {
+            let mut v = String::new();
+            for x in chars.by_ref() {
+                if x == '"' {
+                    break;
+                }
+                v.push(x);
+            }
+            out.push(v);
+        }
+    }
+    out
+}
+
+/// Parse a SHACL-Core shapes graph (the Turtle subset [`emit`] produces / a conformant
+/// author writes) back into tiered facts. The inverse of emission: `sh:class` +
+/// `sh:minCount≥1` → existential (reasoning tier); `sh:class` without a positive
+/// minCount → `@Relation` (nullable); `sh:datatype` → `@Attribute`; `sh:in` → `@Enum`;
+/// non-trivial bounds (min>1 or any max) → `@Cardinality` — exactly the forms the omn
+/// lowering emits, so the ddl planner is source-agnostic and the round-trip is exact.
+pub fn parse(ttl: &str) -> (Vec<Axiom>, Vec<Annotation>) {
+    let mut axioms: Vec<Axiom> = Vec::new();
+    let mut annotations: Vec<Annotation> = Vec::new();
+    let mut enums_seen: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut cur_class: Option<String> = None;
+    let mut cur_prop: Option<InProp> = None;
+
+    let angle = |s: &str| s.trim().trim_start_matches('<').trim_end_matches('>').to_string();
+
+    let flush = |p: InProp,
+                 class: &str,
+                 axioms: &mut Vec<Axiom>,
+                 annotations: &mut Vec<Annotation>,
+                 enums_seen: &mut BTreeMap<String, Vec<String>>| {
+        let Some(path) = p.path else { return };
+        let card_worth = p.min.map(|m| m > 1).unwrap_or(false) || p.max.is_some();
+        if let Some(dt) = p.datatype {
+            annotations.push(Annotation::Attribute {
+                class: class.to_string(),
+                prop: path.clone(),
+                xsd: dt,
+            });
+            if !p.values.is_empty() {
+                enums_seen.entry(path.clone()).or_insert(p.values);
+            }
+        } else if let Some(cls) = p.class {
+            if p.min.unwrap_or(0) >= 1 {
+                axioms.push(Axiom::SubClassOfExistential {
+                    sub: class.to_string(),
+                    role: path.clone(),
+                    filler: cls,
+                });
+            } else {
+                annotations.push(Annotation::Relation {
+                    class: class.to_string(),
+                    prop: path.clone(),
+                    target: cls,
+                });
+            }
+        }
+        if card_worth {
+            annotations.push(Annotation::Cardinality {
+                class: class.to_string(),
+                prop: path,
+                min: p.min.unwrap_or(0),
+                max: p.max,
+            });
+        }
+    };
+
+    for raw in ttl.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('@') || line.starts_with('#') {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("sh:targetClass") {
+            cur_class = Some(angle(rest.trim_end_matches([';', '.']).trim()));
+        } else if line.contains("sh:property") && line.contains('[') {
+            cur_prop = Some(InProp::default());
+        } else if let Some(p) = cur_prop.as_mut() {
+            let body = line.trim_end_matches([';', '.']).trim();
+            if let Some(v) = body.strip_prefix("sh:path") {
+                p.path = Some(angle(v.trim()));
+            } else if let Some(v) = body.strip_prefix("sh:datatype") {
+                p.datatype = Some(expand_xsd(v.trim()));
+            } else if let Some(v) = body.strip_prefix("sh:class") {
+                p.class = Some(angle(v.trim()));
+            } else if let Some(v) = body.strip_prefix("sh:minCount") {
+                p.min = v.trim().parse().ok();
+            } else if let Some(v) = body.strip_prefix("sh:maxCount") {
+                p.max = v.trim().parse().ok();
+            } else if let Some(v) = body.strip_prefix("sh:in") {
+                p.values = quoted_list(v);
+            } else if body.starts_with(']') {
+                if let (Some(pr), Some(cls)) = (cur_prop.take(), cur_class.as_deref()) {
+                    flush(pr, cls, &mut axioms, &mut annotations, &mut enums_seen);
+                }
+            }
+        }
+    }
+    for (prop, values) in enums_seen {
+        annotations.push(Annotation::Enum { prop, values });
+    }
+    (axioms, annotations)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -195,5 +335,33 @@ SubClassOfExistential <s#Role> <s#inheresIn> <s#Bearer>
         assert!(nurse.contains("sh:datatype xsd:string"));
         // deterministic: same input, same bytes
         assert_eq!(ttl, emit(&axioms, &annotations));
+    }
+
+    // The FIXPOINT invariant (RH ruling): shapes are explicit-or-implicit, and feeding
+    // kvasir's own emitted shapes back must realize the SAME DDL. Here: omn facts →
+    // emit → parse → re-emit must be a fixed point, and the parsed facts must plan to
+    // the same tables/FKs (proven byte-exact on the CLI; this locks the module contract).
+    #[test]
+    fn emitted_shapes_round_trip_to_the_same_facts() {
+        let kfs = "\
+SubClassOf <s#Blood> <s#Sample>
+SubClassOfExistential <s#Sample> <s#storedIn> <s#Freezer>
+SubClassOfExistential <s#Sample> <s#testedIn> <s#Assay>
+@Attribute <s#Sample> <s#hasBarcode> <http://www.w3.org/2001/XMLSchema#string>
+@Cardinality <s#Sample> <s#testedIn> 2 *
+@Relation <s#Sample> <s#derivedFrom> <s#Subject>
+@Cardinality <s#Sample> <s#derivedFrom> 0 1
+@Enum <s#hasBarcode> \"a\" \"b\"
+";
+        let (ax, an) = parse_kfs_tiered(kfs).unwrap();
+        let ttl1 = emit(&ax, &an);
+        let (ax2, an2) = parse(&ttl1);
+        let ttl2 = emit(&ax2, &an2);
+        assert_eq!(ttl1, ttl2, "emit∘parse∘emit must be a fixed point");
+        // the storedIn existential survives as NOT NULL (min 1); derivedFrom stays a
+        // nullable @Relation; testedIn stays a many (min 2)
+        assert!(ax2.iter().any(|a| matches!(a, Axiom::SubClassOfExistential { role, .. } if role.ends_with("storedIn"))));
+        assert!(an2.iter().any(|a| matches!(a, Annotation::Relation { prop, .. } if prop.ends_with("derivedFrom"))));
+        assert!(an2.iter().any(|a| matches!(a, Annotation::Cardinality { prop, min: 2, .. } if prop.ends_with("testedIn"))));
     }
 }

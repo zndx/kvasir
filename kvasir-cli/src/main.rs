@@ -161,8 +161,15 @@ fn cmd_verbalise(args: &[String]) -> ExitCode {
 /// self-check before leaving the process (exit 3 otherwise).
 fn cmd_ddl(args: &[String]) -> ExitCode {
     let sql_out = args.iter().any(|a| a == "--sql");
+    // --shapes <file.ttl>: a SHACL Core shapes graph is a first-class constraint source
+    // (the explicit case of the SHACL ruling), read via the lean Core reader.
+    let shapes_path = args
+        .iter()
+        .position(|a| a == "--shapes")
+        .and_then(|i| args.get(i + 1))
+        .cloned();
     let Some(path) = args.get(2).filter(|a| !a.starts_with("--")).cloned() else {
-        eprintln!("usage: kvasir ddl <file.omn|file.kfs> [--sql]");
+        eprintln!("usage: kvasir ddl <file.omn|file.kfs|file.ttl> [--shapes <file.ttl>] [--sql]");
         return ExitCode::from(3);
     };
     let text = match std::fs::read_to_string(&path) {
@@ -172,9 +179,14 @@ fn cmd_ddl(args: &[String]) -> ExitCode {
             return ExitCode::from(3);
         }
     };
+    // a .ttl carries the full denormalized constraint spec — ingest directly (no omn).
+    if path.ends_with(".ttl") || path.ends_with(".shacl") {
+        let (axioms, annotations) = shapes::parse(&text);
+        return finish_ddl(&axioms, &annotations, sql_out);
+    }
     // (kfs, per-emitted-line source citations): .omn lowers internally and cites the
     // user's omn lines; a .kfs file cites its own line numbers.
-    let (kfs, src) = if path.ends_with(".omn") || path.ends_with(".owl") {
+    let (mut kfs, _src) = if path.ends_with(".omn") || path.ends_with(".owl") {
         let (doc, issues) = manchester::parse_document(&text);
         for issue in &issues {
             eprintln!("kvasir ddl: {issue}");
@@ -182,25 +194,27 @@ fn cmd_ddl(args: &[String]) -> ExitCode {
         let low = manchester::lower(&doc);
         (low.kfs, low.src_lines)
     } else {
-        let mut src: Vec<usize> = Vec::new();
-        let mut ann: Vec<usize> = Vec::new();
-        for (i, raw) in text.lines().enumerate() {
-            let comment_at = raw.char_indices().find_map(|(k, c)| {
-                (c == '#' && (k == 0 || raw[..k].ends_with(char::is_whitespace))).then_some(k)
-            });
-            let line = raw[..comment_at.unwrap_or(raw.len())].trim();
-            if line.is_empty() {
-                continue;
+        (text.clone(), Vec::new())
+    };
+    // an explicit sidecar shapes file ADDS its constraints (the class graph stays the
+    // omn's; the shapes carry the denormalized constraint tier).
+    if let Some(sp) = &shapes_path {
+        match std::fs::read_to_string(sp) {
+            Ok(stext) => {
+                let (sax, sann) = shapes::parse(&stext);
+                for a in &sax {
+                    kfs.push_str(&render_axiom(a));
+                }
+                for an in &sann {
+                    kfs.push_str(&render_annotation(an));
+                }
             }
-            if line.starts_with('@') {
-                ann.push(i + 1);
-            } else {
-                src.push(i + 1);
+            Err(e) => {
+                eprintln!("kvasir: cannot read {sp}: {e}");
+                return ExitCode::from(3);
             }
         }
-        src.extend(ann);
-        (text.clone(), src)
-    };
+    }
     let (axioms, annotations) = match parse_kfs_tiered(&kfs) {
         Ok(t) => t,
         Err(oof) => {
@@ -208,15 +222,27 @@ fn cmd_ddl(args: &[String]) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    if let Verdict::Refuted { unsat_classes, .. } = saturate(&axioms) {
+    finish_ddl(&axioms, &annotations, sql_out)
+}
+
+/// The shared DDL tail: gate (refuse inconsistent) → plan → sqlparser self-check → emit.
+/// Citations are omitted here (the `--sql`/plan output is source-independent — the
+/// fixpoint contract); the per-element `cites` in the plan JSON are populated by the
+/// planner from whatever provenance the caller threaded (0 = external/shapes-sourced).
+fn finish_ddl(
+    axioms: &[kvasir_core::Axiom],
+    annotations: &[kvasir_core::Annotation],
+    sql_out: bool,
+) -> ExitCode {
+    if let Verdict::Refuted { unsat_classes, .. } = saturate(axioms) {
         eprintln!(
             "kvasir ddl: REFUSED — ontology is inconsistent (unsat: {unsat_classes:?}); \
              no schema is emitted from a falsified source"
         );
         return ExitCode::from(1);
     }
-    let (ax_cite, ann_cite) = src.split_at(axioms.len().min(src.len()));
-    let mut plan = ddl::plan(&axioms, &annotations, ax_cite, ann_cite);
+    let cites: Vec<usize> = Vec::new();
+    let mut plan = ddl::plan(axioms, annotations, &cites, &cites);
     let (stmts, ok) = ddl::render_and_check(&plan);
     plan.sql_valid = ok;
     if !ok {
@@ -231,6 +257,33 @@ fn cmd_ddl(args: &[String]) -> ExitCode {
         println!("{}", serde_json::to_string_pretty(&plan).unwrap());
     }
     ExitCode::SUCCESS
+}
+
+fn render_axiom(a: &kvasir_core::Axiom) -> String {
+    match a {
+        kvasir_core::Axiom::SubClassOfExistential { sub, role, filler } => {
+            format!("SubClassOfExistential <{sub}> <{role}> <{filler}>\n")
+        }
+        kvasir_core::Axiom::SubClassOf { sub, sup } => format!("SubClassOf <{sub}> <{sup}>\n"),
+        _ => String::new(),
+    }
+}
+
+fn render_annotation(an: &kvasir_core::Annotation) -> String {
+    use kvasir_core::Annotation::*;
+    match an {
+        Attribute { class, prop, xsd } => format!("@Attribute <{class}> <{prop}> <{xsd}>\n"),
+        Cardinality { class, prop, min, max } => {
+            let mx = max.map_or("*".to_string(), |m| m.to_string());
+            format!("@Cardinality <{class}> <{prop}> {min} {mx}\n")
+        }
+        Enum { prop, values } => {
+            let quoted: Vec<String> = values.iter().map(|v| format!("\"{v}\"")).collect();
+            format!("@Enum <{prop}> {}\n", quoted.join(" "))
+        }
+        Label { entity, text } => format!("@Label <{entity}> \"{text}\"\n"),
+        Relation { class, prop, target } => format!("@Relation <{class}> <{prop}> <{target}>\n"),
+    }
 }
 
 /// Manchester → tiered KFS. Parse issues go to stderr (loud containment, exit stays 0
