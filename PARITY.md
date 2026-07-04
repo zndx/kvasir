@@ -21,7 +21,8 @@ Simančík–Kazakov–Horrocks; Horrocks et al. on absorption) — cited, not i
 | Fragment gate (refuse, don't approximate) | — (accepts all, pays generality) | — | **✓ named refusals** | ✓ |
 | Zero-copy payload (FlatBuffers) | — | — | **✓ KFS/kfsb** | ✓ |
 | Range/domain + ∃-propagation refutation | (subsumed) | (subsumed) | **✓ landed 2026-07-03** | ✓ (P0) |
-| Proof-carrying ontology→DDL lowering | — | — | annotation tier landed (`@`-forms routed, kernel-invisible); `kvasir-ddl` crate consumes certified saturations + annotations, cites input axioms per DDL element | **DDL** (rides aegir R1) |
+| Proof-carrying ontology→DDL lowering | — | — | **✓ landed 2026-07-04** — `kvasir ddl` (tool MODULE, not a crate — containment): Manchester/KFS → gated (refuses inconsistent input), cited (source-line provenance), sqlparser-self-checked semantic DDL | ✓ (production cutover rides aegir R1) |
+| Ontology→relational verbalisation | — | — | **✓ landed 2026-07-04** — `kvasir verbalise`: multi-frame recomposition over the owned AST (DeepOnto-lineage recursive merge + same-property rewrite; true-bound phrasing; vacuity guard; no NLP model); populates DDL COMMENT payloads beside citations | ✓ |
 | Told classification + sat/unsat caching | `SatisfiableCache*`, `UnsatisfiableCache*`, `ComputedTypesCaching` | limited | — | **P1** |
 | Incremental reasoning (delta re-check) | `Revision.IncrementalRebuild` family, versioned KB | **none** | — | **P1** |
 | ⊥-locality module extraction | — (entity extraction only) | — (via OWLAPI) | — | **P1** |

@@ -33,6 +33,10 @@ pub struct Column {
     /// The property IRI this column realizes (absent for the surrogate id).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prop: Option<String>,
+    /// Human-legible COMMENT payload (verbalised beside the citation — the comment is
+    /// the citation's readable rendering, never a replacement for it).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
     pub cites: Vec<usize>,
 }
 
@@ -50,6 +54,8 @@ pub struct Table {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
     pub columns: Vec<Column>,
     pub fks: Vec<Fk>,
     pub cites: Vec<usize>,
@@ -143,6 +149,23 @@ fn sql_type(xsd: &str) -> &'static str {
 }
 
 const XSD_NS: &str = "http://www.w3.org/2001/XMLSchema#";
+
+/// Label-first display name for comments (falls back to the local name as words).
+fn display(labels: &BTreeMap<&str, (&str, usize)>, iri: &str) -> String {
+    labels
+        .get(iri)
+        .map(|(l, _)| (*l).to_string())
+        .unwrap_or_else(|| crate::verbalise::words(local(iri)))
+}
+
+fn bound_phrase(min: u32, max: Option<u32>) -> String {
+    match (min, max) {
+        (m, Some(x)) if m == x => format!("exactly {m}"),
+        (0, Some(x)) => format!("at most {x}"),
+        (m, None) => format!("at least {m}"),
+        (m, Some(x)) => format!("{m} to {x}"),
+    }
+}
 
 // ── the planner ────────────────────────────────────────────────────────────────
 /// Build the semantic DDL plan. `ax_cite[i]` / `ann_cite[j]` are the source lines of
@@ -318,6 +341,7 @@ pub fn plan(
             nullable: false,
             pk: true,
             prop: None,
+            comment: None,
             cites: Vec::new(),
         }];
         let mut fks: Vec<Fk> = Vec::new();
@@ -357,6 +381,11 @@ pub fn plan(
                     nullable: true,
                     pk: false,
                     prop: Some((*p).to_string()),
+                    comment: Some(format!(
+                        "the {} of this {} (closed value set)",
+                        crate::verbalise::words(local(p)),
+                        display(&labels, class),
+                    )),
                     cites: cites.clone(),
                 });
             } else {
@@ -366,6 +395,12 @@ pub fn plan(
                     nullable: true,
                     pk: false,
                     prop: Some((*p).to_string()),
+                    comment: Some(format!(
+                        "the {} of this {} ({})",
+                        crate::verbalise::words(local(p)),
+                        display(&labels, class),
+                        local(x),
+                    )),
                     cites: cites.clone(),
                 });
             }
@@ -403,6 +438,13 @@ pub fn plan(
                     nullable: min == 0,
                     pk: false,
                     prop: Some((*p).to_string()),
+                    comment: Some(format!(
+                        "references the {} this {} {} ({})",
+                        display(&labels, t),
+                        display(&labels, class),
+                        crate::verbalise::words(local(p)),
+                        bound_phrase(min, max),
+                    )),
                     cites: cites.clone(),
                 });
                 fks.push(Fk {
@@ -429,10 +471,12 @@ pub fn plan(
             cites.push(*lc);
             (*l).to_string()
         });
+        let comment = Some(format!("one row per {}", display(&labels, class)));
         tables.push(Table {
             class: (*class).to_string(),
             name: tname,
             label,
+            comment,
             columns,
             fks,
             cites,
@@ -445,12 +489,14 @@ pub fn plan(
             class: (*class).to_string(),
             name: names[class].clone(),
             label,
+            comment: Some(format!("reference: one row per {}", display(&labels, class))),
             columns: vec![Column {
                 name: "id".into(),
                 sql_type: "VARCHAR(255)".into(),
                 nullable: false,
                 pk: true,
                 prop: None,
+                comment: None,
                 cites: Vec::new(),
             }],
             fks: Vec::new(),

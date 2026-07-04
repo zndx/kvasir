@@ -16,6 +16,7 @@
 
 mod ddl;
 mod manchester;
+mod verbalise;
 
 use std::process::ExitCode;
 
@@ -28,14 +29,39 @@ fn main() -> ExitCode {
         Some("convert") => cmd_convert(&args),
         Some("lower") => cmd_lower(&args),
         Some("ddl") => cmd_ddl(&args),
+        Some("verbalise") => cmd_verbalise(&args),
         _ => {
             eprintln!("usage: kvasir check <file.kfs|file.kfsb> [--json]");
             eprintln!("       kvasir convert <in.kfs> <out.kfsb>");
             eprintln!("       kvasir lower <file.omn> [--json]");
             eprintln!("       kvasir ddl <file.omn|file.kfs> [--sql]");
+            eprintln!("       kvasir verbalise <file.omn>");
             ExitCode::from(3)
         }
     }
+}
+
+/// Manchester → per-class multi-frame verbalisations (JSON). The corpus-side artifact;
+/// the ddl plan carries the single-sentence COMMENT payloads separately.
+fn cmd_verbalise(args: &[String]) -> ExitCode {
+    let Some(path) = args.get(2).filter(|a| !a.starts_with("--")).cloned() else {
+        eprintln!("usage: kvasir verbalise <file.omn>");
+        return ExitCode::from(3);
+    };
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("kvasir: cannot read {path}: {e}");
+            return ExitCode::from(3);
+        }
+    };
+    let (doc, issues) = manchester::parse_document(&text);
+    for issue in &issues {
+        eprintln!("kvasir verbalise: {issue}");
+    }
+    let out = verbalise::verbalise_document(&doc, 5);
+    println!("{}", serde_json::to_string_pretty(&out).unwrap());
+    ExitCode::SUCCESS
 }
 
 /// Manchester or tiered KFS → proof-carrying semantic DDL plan (JSON; `--sql` renders
