@@ -16,6 +16,7 @@
 
 mod census;
 mod ddl;
+mod shapes;
 mod manchester;
 mod verbalise;
 
@@ -32,6 +33,7 @@ fn main() -> ExitCode {
         Some("ddl") => cmd_ddl(&args),
         Some("verbalise") => cmd_verbalise(&args),
         Some("census") => cmd_census(&args),
+        Some("shapes") => cmd_shapes(&args),
         _ => {
             eprintln!("usage: kvasir check <file.kfs|file.kfsb> [--json]");
             eprintln!("       kvasir convert <in.kfs> <out.kfsb>");
@@ -39,9 +41,46 @@ fn main() -> ExitCode {
             eprintln!("       kvasir ddl <file.omn|file.kfs> [--sql]");
             eprintln!("       kvasir verbalise <file.omn>");
             eprintln!("       kvasir census <file.omn|file.kfs>");
+            eprintln!("       kvasir shapes <file.omn|file.kfs>");
             ExitCode::from(3)
         }
     }
+}
+
+/// The IMPLICIT shapes emission: SHACL Core (Turtle) derived from the same tiered
+/// facts the ddl module consumes — the standard syntax users extend, and the artifact
+/// a third-party conformant toolchain realizes the same DDL from. Denormalized per
+/// class (no entailment regime assumed); canonical byte order.
+fn cmd_shapes(args: &[String]) -> ExitCode {
+    let Some(path) = args.get(2).filter(|a| !a.starts_with("--")).cloned() else {
+        eprintln!("usage: kvasir shapes <file.omn|file.kfs>");
+        return ExitCode::from(3);
+    };
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("kvasir: cannot read {path}: {e}");
+            return ExitCode::from(3);
+        }
+    };
+    let kfs = if path.ends_with(".omn") || path.ends_with(".owl") {
+        let (doc, issues) = manchester::parse_document(&text);
+        for issue in &issues {
+            eprintln!("kvasir shapes: {issue}");
+        }
+        manchester::lower(&doc).kfs
+    } else {
+        text
+    };
+    let (axioms, annotations) = match parse_kfs_tiered(&kfs) {
+        Ok(t) => t,
+        Err(oof) => {
+            eprintln!("kvasir: {oof}");
+            return ExitCode::from(2);
+        }
+    };
+    print!("{}", shapes::emit(&axioms, &annotations));
+    ExitCode::SUCCESS
 }
 
 /// The PREFLIGHT instrument: what this ontology can support, before running ddl.
