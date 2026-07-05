@@ -59,6 +59,13 @@ pub enum Annotation {
     },
     /// `@Enum <prop> "v" …` — a closed value set (lookup-table fuel)
     Enum { prop: Name, values: Vec<String> },
+    /// `@Unique <prop>` — an InverseFunctional object property (the FOAF-mbox identity
+    /// idiom): the referencing FK column carries a UNIQUE constraint in the DDL lowering.
+    Unique { prop: Name },
+    /// `@Key <class> <prop> [<prop>…]` — an OWL 2 `HasKey` axiom: the properties identify
+    /// instances of the class. A SINGLE-prop key elects the natural PRIMARY KEY in the DDL
+    /// lowering (the SchemaPile-real alternative to a synthesized surrogate `id`).
+    Key { class: Name, props: Vec<Name> },
     /// `@Label <entity> "text"` — display text (semantic-register COMMENT payload only)
     Label { entity: Name, text: String },
     /// `@Relation <class> <prop> <target>` — an object-property relation that is NOT
@@ -304,6 +311,26 @@ fn parse_annotation(line_no: usize, rest: &str) -> Result<Annotation, OutOfFragm
                 prop: args[1].clone(),
                 min,
                 max,
+            })
+        }
+        "Unique" => {
+            let args: Vec<String> = tail.split_whitespace().map(strip_angles).collect();
+            if args.len() != 1 {
+                return Err(err(format!("@Unique <prop> expects 1 argument, got {}", args.len())));
+            }
+            Ok(Annotation::Unique { prop: args[0].clone() })
+        }
+        "Key" => {
+            let args: Vec<String> = tail.split_whitespace().map(strip_angles).collect();
+            if args.len() < 2 {
+                return Err(err(format!(
+                    "@Key <class> <prop> [<prop>…] expects ≥2 arguments, got {}",
+                    args.len()
+                )));
+            }
+            Ok(Annotation::Key {
+                class: args[0].clone(),
+                props: args[1..].to_vec(),
             })
         }
         "Enum" => {

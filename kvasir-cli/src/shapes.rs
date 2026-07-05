@@ -67,6 +67,8 @@ pub fn emit(axioms: &[Axiom], annotations: &[Annotation]) -> String {
     let mut attrs: BTreeMap<&str, Vec<(&str, &str)>> = BTreeMap::new();
     let mut cards: BTreeMap<(&str, &str), (u32, Option<u32>)> = BTreeMap::new();
     let mut enums: BTreeMap<&str, &Vec<String>> = BTreeMap::new();
+    let mut key_of: BTreeMap<&str, &Vec<String>> = BTreeMap::new();
+    let mut unique_props: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
     for an in annotations {
         match an {
             Annotation::Attribute { class, prop, xsd } => {
@@ -79,6 +81,12 @@ pub fn emit(axioms: &[Axiom], annotations: &[Annotation]) -> String {
                 enums.insert(prop, values);
             }
             Annotation::Label { .. } => {}
+            Annotation::Key { class, props } => {
+                key_of.insert(class, props);
+            }
+            Annotation::Unique { prop } => {
+                unique_props.insert(prop.as_str());
+            }
             Annotation::Relation { class, prop, target } => {
                 // a schema-real non-existential relation → sh:class, no minCount
                 // (optional). Pushed after existentials so the NOT NULL wins on dedup.
@@ -107,7 +115,7 @@ pub fn emit(axioms: &[Axiom], annotations: &[Annotation]) -> String {
     all_classes.dedup();
 
     let mut out = String::from(
-        "@prefix sh: <http://www.w3.org/ns/shacl#> .\n@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n\n",
+        "@prefix sh: <http://www.w3.org/ns/shacl#> .\n@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n@prefix kvasir: <https://kvasir.zndx.org/ns#> .\n\n",
     );
     for class in &all_classes {
         let mut props: BTreeMap<&str, PropShape> = BTreeMap::new();
@@ -123,16 +131,32 @@ pub fn emit(axioms: &[Axiom], annotations: &[Annotation]) -> String {
                     }
                 }
             }
-            for (p, t, is_ex) in exts.get(holder).map(|v| v.as_slice()).unwrap_or(&[]) {
+            // WINNER-PER-(class,prop) — the SAME deterministic rule as the ddl rollup
+            // (existential first, then lexicographic target): a multi-filler property
+            // collapses identically on both sides, so the fixpoint holds.
+            let holder_exts = exts.get(holder).map(|v| v.as_slice()).unwrap_or(&[]);
+            let mut by_prop: BTreeMap<&str, Vec<&(&str, &str, bool)>> = BTreeMap::new();
+            for e in holder_exts {
+                by_prop.entry(e.0).or_default().push(e);
+            }
+            for (p, mut group) in by_prop {
+                group.sort_by_key(|e| (!e.2, e.1));
+                let (_, t, is_ex) = group[0];
                 let entry = props.entry(p).or_default();
                 if entry.datatype.is_none() && entry.class.is_none() {
                     entry.class = Some((*t).to_string());
                     // an existential defaults to minCount 1 (NOT NULL); a pure @Relation
-                    // to 0 (optional). An explicit @Cardinality overrides either.
-                    let (mn, mx) = cards
-                        .get(&(holder, *p))
-                        .copied()
-                        .unwrap_or((if *is_ex { 1 } else { 0 }, None));
+                    // to 0 (optional). An explicit @Cardinality overrides either — but a
+                    // multi-filler property's bounds are ambiguous by construction, so the
+                    // winner's default applies there.
+                    let (mn, mx) = if group.len() == 1 {
+                        cards
+                            .get(&(holder, p))
+                            .copied()
+                            .unwrap_or((if *is_ex { 1 } else { 0 }, None))
+                    } else {
+                        (if *is_ex { 1 } else { 0 }, None)
+                    };
                     entry.min = Some(mn);
                     entry.max = mx;
                 }
@@ -142,8 +166,18 @@ pub fn emit(axioms: &[Axiom], annotations: &[Annotation]) -> String {
             continue; // same election as ddl: nothing evidenced, no shape
         }
         out.push_str(&format!("<{class}Shape>\n    a sh:NodeShape ;\n    sh:targetClass <{class}> ;\n"));
+        // kvasir:key — NOT SHACL Core (Core cannot express cross-node uniqueness); an
+        // emitted, documented annotation so a third-party toolchain reproduces the SAME
+        // DDL from the shapes graph alone (the fixpoint invariant carries key election).
+        if let Some(kprops) = key_of.get(*class) {
+            let plist = kprops.iter().map(|k| format!("<{k}>")).collect::<Vec<_>>().join(" ");
+            out.push_str(&format!("    kvasir:key ( {plist} ) ;\n"));
+        }
         for (path, ps) in &props {
             out.push_str(&format!("    sh:property [\n        sh:path <{path}> ;\n"));
+            if unique_props.contains(&path[..]) {
+                out.push_str("        kvasir:unique true ;\n");
+            }
             if let Some(dt) = &ps.datatype {
                 let dt_short = dt
                     .strip_prefix(XSD_NS)
@@ -183,6 +217,7 @@ pub fn emit(axioms: &[Axiom], annotations: &[Annotation]) -> String {
 #[derive(Default)]
 struct InProp {
     path: Option<String>,
+    unique: bool,
     datatype: Option<String>,
     class: Option<String>,
     min: Option<u32>,
@@ -235,6 +270,9 @@ pub fn parse(ttl: &str) -> (Vec<Axiom>, Vec<Annotation>) {
                  annotations: &mut Vec<Annotation>,
                  enums_seen: &mut BTreeMap<String, Vec<String>>| {
         let Some(path) = p.path else { return };
+        if p.unique {
+            annotations.push(Annotation::Unique { prop: path.clone() });
+        }
         let card_worth = p.min.map(|m| m > 1).unwrap_or(false) || p.max.is_some();
         if let Some(dt) = p.datatype {
             annotations.push(Annotation::Attribute {
@@ -277,6 +315,20 @@ pub fn parse(ttl: &str) -> (Vec<Axiom>, Vec<Annotation>) {
         }
         if let Some(rest) = line.strip_prefix("sh:targetClass") {
             cur_class = Some(angle(rest.trim_end_matches([';', '.']).trim()));
+        } else if let Some(rest) = line.strip_prefix("kvasir:key") {
+            if let Some(cls) = cur_class.as_deref() {
+                let props: Vec<String> = rest
+                    .trim_end_matches([';', '.'])
+                    .trim()
+                    .trim_start_matches('(')
+                    .trim_end_matches(')')
+                    .split_whitespace()
+                    .map(|t| angle(t))
+                    .collect();
+                if !props.is_empty() {
+                    annotations.push(Annotation::Key { class: cls.to_string(), props });
+                }
+            }
         } else if line.contains("sh:property") && line.contains('[') {
             cur_prop = Some(InProp::default());
         } else if let Some(p) = cur_prop.as_mut() {
@@ -293,6 +345,8 @@ pub fn parse(ttl: &str) -> (Vec<Axiom>, Vec<Annotation>) {
                 p.max = v.trim().parse().ok();
             } else if let Some(v) = body.strip_prefix("sh:in") {
                 p.values = quoted_list(v);
+            } else if body.strip_prefix("kvasir:unique").is_some() {
+                p.unique = true;
             } else if body.starts_with(']') {
                 if let (Some(pr), Some(cls)) = (cur_prop.take(), cur_class.as_deref()) {
                     flush(pr, cls, &mut axioms, &mut annotations, &mut enums_seen);

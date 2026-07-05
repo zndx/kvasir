@@ -161,6 +161,7 @@ fn cmd_verbalise(args: &[String]) -> ExitCode {
 /// self-check before leaving the process (exit 3 otherwise).
 fn cmd_ddl(args: &[String]) -> ExitCode {
     let sql_out = args.iter().any(|a| a == "--sql");
+    let stats_out = args.iter().any(|a| a == "--stats");
     // --shapes <file.ttl>: a SHACL Core shapes graph is a first-class constraint source
     // (the explicit case of the SHACL ruling), read via the lean Core reader.
     let shapes_path = args
@@ -182,16 +183,25 @@ fn cmd_ddl(args: &[String]) -> ExitCode {
     // a .ttl carries the full denormalized constraint spec — ingest directly (no omn).
     if path.ends_with(".ttl") || path.ends_with(".shacl") {
         let (axioms, annotations) = shapes::parse(&text);
-        return finish_ddl(&axioms, &annotations, sql_out);
+        return finish_ddl(&axioms, &annotations, sql_out, stats_out, None, None, &[]);
     }
     // (kfs, per-emitted-line source citations): .omn lowers internally and cites the
     // user's omn lines; a .kfs file cites its own line numbers.
+    let mut low_conflicts: Vec<String> = Vec::new();
+    let mut low_constructs: Option<std::collections::BTreeMap<String, usize>> = None;
+    let mut low_skipped: Option<std::collections::BTreeMap<String, usize>> = None;
     let (mut kfs, _src) = if path.ends_with(".omn") || path.ends_with(".owl") {
         let (doc, issues) = manchester::parse_document(&text);
         for issue in &issues {
             eprintln!("kvasir ddl: {issue}");
         }
         let low = manchester::lower(&doc);
+        for c in &low.conflicts {
+            eprintln!("kvasir ddl: CONFLICT {c}");
+        }
+        low_conflicts = low.conflicts.clone();
+        low_constructs = Some(low.constructs);
+        low_skipped = Some(low.skipped);
         (low.kfs, low.src_lines)
     } else {
         (text.clone(), Vec::new())
@@ -222,17 +232,46 @@ fn cmd_ddl(args: &[String]) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    finish_ddl(&axioms, &annotations, sql_out)
+    finish_ddl(&axioms, &annotations, sql_out, stats_out,
+               low_constructs.as_ref(), low_skipped.as_ref(), &low_conflicts)
 }
 
 /// The shared DDL tail: gate (refuse inconsistent) → plan → sqlparser self-check → emit.
 /// Citations are omitted here (the `--sql`/plan output is source-independent — the
 /// fixpoint contract); the per-element `cites` in the plan JSON are populated by the
 /// planner from whatever provenance the caller threaded (0 = external/shapes-sourced).
+/// The DDL code-path registry `--stats` measures coverage against. Dormant entries are the
+/// upstream derive agent's COMPLEXITY BRIEF: paths the input's conceptualization never
+/// exercised — an invitation to model the domain's junctions, closed vocabularies, identity
+/// idioms, and bounded relations (or to push beyond them deliberately).
+const DDL_PATHS: &[&str] = &[
+    "data_restriction",
+    "relation_optional",
+    "cardinality_one",
+    "cardinality_many",
+    "k1_haskey",
+    "k2_inverse_functional",
+    "k3_identifier_key",
+    "k4_oneof_enum",
+    "functional_characteristic",
+    "oneof_class",
+    "junction_tables",
+    "lookup_tables",
+    "reference_tables",
+    "pk_natural",
+    "unique_columns",
+    "nullable_fk_columns",
+    "composite_key_deferred",
+];
+
 fn finish_ddl(
     axioms: &[kvasir_core::Axiom],
     annotations: &[kvasir_core::Annotation],
     sql_out: bool,
+    stats_out: bool,
+    constructs: Option<&std::collections::BTreeMap<String, usize>>,
+    skipped: Option<&std::collections::BTreeMap<String, usize>>,
+    conflicts: &[String],
 ) -> ExitCode {
     if let Verdict::Refuted { unsat_classes, .. } = saturate(axioms) {
         eprintln!(
@@ -248,6 +287,31 @@ fn finish_ddl(
     if !ok {
         eprintln!("kvasir ddl: INTERNAL — rendered SQL failed the sqlparser self-check");
         return ExitCode::from(3);
+    }
+    if stats_out {
+        let empty = std::collections::BTreeMap::new();
+        let cons = constructs.unwrap_or(&empty);
+        let skip = skipped.unwrap_or(&empty);
+        let mut counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+        for (k, v) in cons.iter().chain(plan.stats.iter()) {
+            counts.insert(k.as_str(), *v);
+        }
+        let exercised: Vec<&str> = DDL_PATHS.iter().copied().filter(|p| counts.get(p).copied().unwrap_or(0) > 0).collect();
+        let dormant: Vec<&str> = DDL_PATHS.iter().copied().filter(|p| counts.get(p).copied().unwrap_or(0) == 0).collect();
+        let ratio = exercised.len() as f64 / DDL_PATHS.len() as f64;
+        let out = serde_json::json!({
+            "constructs": cons,
+            "elections": plan.stats,
+            "skipped": skip,
+            "conflicts": conflicts,
+            "coverage": {
+                "paths_exercised": exercised,
+                "paths_dormant": dormant,
+                "coverage_ratio": (ratio * 1000.0).round() / 1000.0,
+            },
+        });
+        println!("{}", serde_json::to_string_pretty(&out).unwrap());
+        return ExitCode::SUCCESS;
     }
     if sql_out {
         for s in &stmts {
@@ -283,6 +347,11 @@ fn render_annotation(an: &kvasir_core::Annotation) -> String {
         }
         Label { entity, text } => format!("@Label <{entity}> \"{text}\"\n"),
         Relation { class, prop, target } => format!("@Relation <{class}> <{prop}> <{target}>\n"),
+        Unique { prop } => format!("@Unique <{prop}>\n"),
+        Key { class, props } => {
+            let plist = props.iter().map(|p| format!("<{p}>")).collect::<Vec<_>>().join(" ");
+            format!("@Key <{class}> {plist}\n")
+        }
     }
 }
 

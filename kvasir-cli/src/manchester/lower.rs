@@ -39,8 +39,17 @@ pub struct Lowering {
     pub n_annotations: usize,
     pub src_lines: Vec<usize>,
     pub skipped: BTreeMap<String, usize>,
+    /// Which lowering code paths the input exercised (`--stats` coverage; the upstream
+    /// derive agent reads the DORMANT complement as its complexity brief).
+    pub constructs: BTreeMap<String, usize>,
+    /// PARSE-TIME REFUTATION SIGNALS: contradictions detectable syntactically — e.g. the
+    /// same (class, property) carrying incompatible cardinality bounds (min 2 vs max 1
+    /// = ⊥, which then ∃-⊥-cascades; measured poisoning 1,489 classes at corpus scale
+    /// before HermiT named it in 341s — this catches it in microseconds).
+    pub conflicts: Vec<String>,
 }
 
+const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
 const XSD_NS: &str = "http://www.w3.org/2001/XMLSchema#";
 
 fn is_label_prop(tok: &str, doc: &Document) -> bool {
@@ -121,9 +130,15 @@ struct Ctx<'a> {
     skipped: BTreeMap<String, usize>,
     seen_labels: BTreeSet<String>,
     seen_attrs: BTreeSet<(String, String)>,
-    seen_cards: BTreeSet<(String, String)>,
+    seen_cards: BTreeMap<(String, String), (u32, Option<u32>)>,
+    seen_card_ann: BTreeSet<(String, String)>,
     seen_enums: BTreeSet<String>,
     seen_rels: BTreeSet<(String, String)>,
+    seen_keys: BTreeSet<String>,
+    identifier_props: BTreeSet<String>,
+    oneof_classes: BTreeMap<String, Vec<String>>,
+    constructs: BTreeMap<String, usize>,
+    conflicts: Vec<String>,
 }
 
 impl<'a> Ctx<'a> {
@@ -135,6 +150,10 @@ impl<'a> Ctx<'a> {
     fn ann(&mut self, line: String) {
         self.annotations.push(line);
         self.ann_lines.push(self.cur_line);
+    }
+
+    fn stat(&mut self, key: &str) {
+        *self.constructs.entry(key.to_string()).or_insert(0) += 1;
     }
 
     fn skip(&mut self, key: &str) {
@@ -154,7 +173,8 @@ impl<'a> Ctx<'a> {
             }
             Expr::Some { property, filler } => self.lower_existential(subject, property, filler, None),
             Expr::Exactly { property, n, filler } => {
-                self.card(subject, property, *n, Some(*n));
+                let fname = filler.as_deref().and_then(|f| if let Expr::Named(x) = f { Some(x.clone()) } else { None });
+                self.card(subject, property, *n, Some(*n), fname);
                 if *n >= 1 {
                     match filler.as_deref() {
                         Some(f) => self.lower_existential(subject, property, f, None),
@@ -166,7 +186,8 @@ impl<'a> Ctx<'a> {
             }
             Expr::Min { property, n, filler } => {
                 if *n > 1 {
-                    self.card(subject, property, *n, None);
+                    let fname = filler.as_deref().and_then(|f| if let Expr::Named(x) = f { Some(x.clone()) } else { None });
+                    self.card(subject, property, *n, None, fname);
                 }
                 if *n >= 1 {
                     match filler.as_deref() {
@@ -178,7 +199,8 @@ impl<'a> Ctx<'a> {
                 }
             }
             Expr::Max { property, n, filler } => {
-                self.card(subject, property, 0, Some(*n));
+                let fname = filler.as_deref().and_then(|f| if let Expr::Named(x) = f { Some(x.clone()) } else { None });
+                self.card(subject, property, 0, Some(*n), fname);
                 // a max relation is schema-real (an optional/nullable FK) but not
                 // existentially forced — the annotation tier carries it so the DDL
                 // planner renders the column (leak-2 fix: without this the relation
@@ -220,11 +242,38 @@ impl<'a> Ctx<'a> {
             Expr::Named(f) => {
                 let p = self.x(property);
                 let f_x = self.x(f);
+                if let Some(vals) = self.oneof_classes.get(&f_x).cloned() {
+                    // K4: the filler is an enumeration class ({a b c}) — a closed VALUE SET,
+                    // not an entity. Lower as attribute + enum ONLY (no relation axiom), so
+                    // the planner renders a lookup table, never an entity/reference table.
+                    let key = (subject.to_string(), p.clone());
+                    if self.seen_attrs.insert(key) {
+                        self.ann(format!("@Attribute <{subject}> <{p}> <{XSD_STRING}>"));
+                    }
+                    if self.seen_enums.insert(p.clone()) {
+                        let quoted: Vec<String> =
+                            vals.iter().filter(|v| quotable(v)).map(|v| format!("\"{v}\"")).collect();
+                        if quoted.len() >= 2 {
+                            self.ann(format!("@Enum <{p}> {}", quoted.join(" ")));
+                            self.stat("k4_oneof_enum");
+                        }
+                    }
+                    return;
+                }
                 self.ax(format!("SubClassOfExistential <{subject}> <{p}> <{f_x}>"));
                 if f.starts_with("xsd:") || f_x.starts_with(XSD_NS) {
                     let key = (subject.to_string(), p.clone());
                     if self.seen_attrs.insert(key) {
                         self.ann(format!("@Attribute <{subject}> <{p}> <{f_x}>"));
+                        self.stat("data_restriction");
+                    }
+                    // K3: an identifier-vocabulary property restricted on this class IS its
+                    // declared natural key — the wild idiom for owl:hasKey (first one wins).
+                    if self.identifier_props.contains(&p)
+                        && self.seen_keys.insert(subject.to_string())
+                    {
+                        self.ann(format!("@Key <{subject}> <{p}>"));
+                        self.stat("k3_identifier_key");
                     }
                 }
             }
@@ -242,15 +291,60 @@ impl<'a> Ctx<'a> {
         }
         if self.seen_rels.insert((subject.to_string(), p.clone())) {
             self.ann(format!("@Relation <{subject}> <{p}> <{f}>"));
+            self.stat("relation_optional");
         }
     }
 
-    fn card(&mut self, subject: &str, property: &str, min: u32, max: Option<u32>) {
+    fn card(&mut self, subject: &str, property: &str, min: u32, max: Option<u32>,
+            filler: Option<String>) {
         let p = self.x(property);
-        let key = (subject.to_string(), p.clone());
-        if self.seen_cards.insert(key) {
-            let mx = max.map_or("*".to_string(), |m| m.to_string());
-            self.ann(format!("@Cardinality <{subject}> <{p}> {min} {mx}"));
+        // CONFLICT key includes the FILLER: qualified bounds over DIFFERENT fillers are
+        // compatible (exactly-1-University + min-2-Course is 3 successors, satisfiable —
+        // HermiT-verified; the fillerless key falsely refuted it, violating kvasir's
+        // sound-for-refutation contract). Unqualified bounds (filler None) constrain the
+        // TOTAL and conflict with any same-prop bound.
+        let fkey = filler.map(|f| self.x(&f)).unwrap_or_default();
+        let key = (subject.to_string(), format!("{p}|{fkey}"));
+        // local min>max is ⊥ outright
+        if max.map_or(false, |m| min > m) {
+            self.conflicts.push(format!(
+                "<{subject}> <{p}>: min {min} > max {} — unsatisfiable bound",
+                max.unwrap()
+            ));
+        }
+        match self.seen_cards.get(&key) {
+            None => {
+                self.seen_cards.insert(key.clone(), (min, max));
+                let ann_key = (subject.to_string(), p.clone());
+                if self.seen_card_ann.insert(ann_key) {
+                    let mx = max.map_or("*".to_string(), |m| m.to_string());
+                    self.ann(format!("@Cardinality <{subject}> <{p}> {min} {mx}"));
+                    self.stat(if min > 1 || max.map_or(false, |m| m > 1) {
+                        "cardinality_many"
+                    } else {
+                        "cardinality_one"
+                    });
+                }
+            }
+            Some(&(pmin, pmax)) if pmin != min || pmax != max => {
+                // two restrictions, incompatible bounds: the combined min is max(mins),
+                // combined max is min(maxes) — empty interval ⇒ the class is ⊥ (and the
+                // ∃-⊥ cascade spreads it to everything requiring a successor here).
+                let cmin = pmin.max(min);
+                let cmax = match (pmax, max) {
+                    (Some(a), Some(b)) => Some(a.min(b)),
+                    (a, b) => a.or(b),
+                };
+                if cmax.map_or(false, |m| cmin > m) {
+                    self.conflicts.push(format!(
+                        "<{subject}> <{p}>: conflicting bounds ({pmin}..{}) vs ({min}..{}) \
+                         — combined interval empty ⇒ class unsatisfiable",
+                        pmax.map_or("*".into(), |m: u32| m.to_string()),
+                        max.map_or("*".into(), |m: u32| m.to_string())
+                    ));
+                }
+            }
+            _ => {}
         }
     }
 
@@ -277,10 +371,109 @@ pub fn lower(doc: &Document) -> Lowering {
         skipped: BTreeMap::new(),
         seen_labels: BTreeSet::new(),
         seen_attrs: BTreeSet::new(),
-        seen_cards: BTreeSet::new(),
+        seen_cards: BTreeMap::new(),
+        seen_card_ann: BTreeSet::new(),
         seen_enums: BTreeSet::new(),
         seen_rels: BTreeSet::new(),
+        seen_keys: BTreeSet::new(),
+        identifier_props: BTreeSet::new(),
+        oneof_classes: BTreeMap::new(),
+        constructs: BTreeMap::new(),
+        conflicts: Vec::new(),
     };
+
+    // ── the NATURAL key-election ladder pre-pass (K2/K3/K4) ─────────────────────────
+    // Real-world ontologies rarely assert owl:hasKey; identity arrives through naturally
+    // occurring constructs instead. Collected here, elected during the main walk:
+    //   K2  InverseFunctional object property  → @Unique (FK column UNIQUE)
+    //   K3  identifier-vocabulary data property (dcterms:identifier / skos:notation /
+    //       schema:identifier / IAO_0000578, own IRI or SubPropertyOf-closure) → @Key
+    //   K4  EquivalentTo: { i1 i2 … } enumeration class → @Enum on relations targeting it
+    const ID_VOCAB: &[&str] = &[
+        "http://purl.org/dc/terms/identifier",
+        "http://purl.org/dc/elements/1.1/identifier",
+        "http://www.w3.org/2004/02/skos/core#notation",
+        "https://schema.org/identifier",
+        "http://schema.org/identifier",
+        "http://purl.obolibrary.org/obo/IAO_0000578",
+    ];
+    let mut subprop: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for frame in &doc.frames {
+        let subject = ctx.x(&frame.subject);
+        match frame.kind {
+            FrameKind::DataProperty => {
+                for section in &frame.sections {
+                    if section.keyword == "SubPropertyOf" {
+                        for item in &section.items {
+                            if let Expr::Named(n) = item {
+                                subprop.entry(subject.clone()).or_default().push(ctx.x(n));
+                            }
+                        }
+                    }
+                }
+            }
+            FrameKind::ObjectProperty => {
+                for section in &frame.sections {
+                    if section.keyword == "Characteristics" {
+                        for item in &section.items {
+                            if matches!(item, Expr::Named(n) if n == "InverseFunctional") {
+                                ctx.ann(format!("@Unique <{subject}>"));
+                                ctx.stat("k2_inverse_functional");
+                            } else if matches!(item, Expr::Named(n) if n == "Functional") {
+                                ctx.stat("functional_characteristic");
+                            }
+                        }
+                    }
+                }
+            }
+            FrameKind::Class => {
+                for section in &frame.sections {
+                    if section.keyword == "EquivalentTo" {
+                        for item in &section.items {
+                            if let Expr::OneOf(inds) = item {
+                                let vals: Vec<String> = inds
+                                    .iter()
+                                    .map(|i| {
+                                        let full = ctx.x(i);
+                                        full.rsplit(['#', '/']).next().unwrap_or(&full).to_string()
+                                    })
+                                    .collect();
+                                ctx.oneof_classes.insert(subject.clone(), vals);
+                                ctx.stat("oneof_class");
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    // identifier closure: own IRI in the vocabulary, or reaches it over SubPropertyOf edges
+    let is_id = |iri: &str, sp: &BTreeMap<String, Vec<String>>| -> bool {
+        if ID_VOCAB.contains(&iri) {
+            return true;
+        }
+        let mut stack = vec![iri.to_string()];
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        while let Some(cur) = stack.pop() {
+            if !seen.insert(cur.clone()) {
+                continue;
+            }
+            if ID_VOCAB.contains(&cur.as_str()) {
+                return true;
+            }
+            if let Some(supers) = sp.get(&cur) {
+                stack.extend(supers.iter().cloned());
+            }
+        }
+        false
+    };
+    let all_props: BTreeSet<String> = subprop.keys().cloned().collect();
+    for prop in &all_props {
+        if is_id(prop, &subprop) {
+            ctx.identifier_props.insert(prop.clone());
+        }
+    }
 
     // top-level DisjointClasses blocks — n-ary lowers to all pairs (entailed)
     for block in &doc.disjoint_blocks {
@@ -332,6 +525,25 @@ pub fn lower(doc: &Document) -> Lowering {
                                 } else {
                                     ctx.skip("disjoint:non-atomic");
                                 }
+                            }
+                        }
+                        "HasKey" => {
+                            let mut props: Vec<String> = Vec::new();
+                            for item in &section.items {
+                                if let Expr::Named(n) = item {
+                                    props.push(ctx.x(n));
+                                } else {
+                                    ctx.skip("haskey:non-atomic");
+                                }
+                            }
+                            if !props.is_empty() {
+                                ctx.stat(if props.len() > 1 { "k1_haskey_composite" } else { "k1_haskey" });
+                                let plist = props
+                                    .iter()
+                                    .map(|p| format!("<{p}>"))
+                                    .collect::<Vec<_>>()
+                                    .join(" ");
+                                ctx.ann(format!("@Key <{subject}> {plist}"));
                             }
                         }
                         "Annotations" => {}
@@ -404,6 +616,8 @@ pub fn lower(doc: &Document) -> Lowering {
         n_annotations,
         src_lines,
         skipped: ctx.skipped,
+        constructs: ctx.constructs,
+        conflicts: ctx.conflicts,
     }
 }
 

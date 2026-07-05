@@ -30,16 +30,16 @@ const EXPR_SECTIONS: &[&str] = &[
     "Domain",
     "Range",
     "Types",
+    "HasKey",
+    "SubPropertyOf",
+    "Characteristics",
 ];
 
 /// Sections we recognize (so the inline scanner can split on them) but whose bodies
 /// the v0 lowering only COUNTS — recorded by keyword, routed at lowering.
 const OTHER_SECTIONS: &[&str] = &[
     "Annotations",
-    "SubPropertyOf",
-    "Characteristics",
     "InverseOf",
-    "HasKey",
     "Facts",
     "SameAs",
     "DifferentFrom",
